@@ -107,20 +107,20 @@
 
 #define __log_panic(log_fmt, log_args...)                                                          \
     do {                                                                                           \
-        VLOG_PRINTF(VLOG_PANIC, log_fmt, ##log_args);                                              \
+        DOCA_LOG_CRIT(VLOG_PANIC, log_fmt, ##log_args);                                            \
         std::terminate();                                                                          \
     } while (0)
 #define __log_err(log_fmt, log_args...)                                                            \
     do {                                                                                           \
-        VLOG_PRINTF(VLOG_ERROR, log_fmt, ##log_args);                                              \
+        DOCA_LOG_ERR(VLOG_ERROR, log_fmt, ##log_args);                                             \
     } while (0)
 #define __log_warn(log_fmt, log_args...)                                                           \
     do {                                                                                           \
-        VLOG_PRINTF(VLOG_WARNING, log_fmt, ##log_args);                                            \
+        DOCA_LOG_WARN(VLOG_WARNING, log_fmt, ##log_args);                                          \
     } while (0)
 #define __log_info(log_fmt, log_args...)                                                           \
     do {                                                                                           \
-        VLOG_PRINTF(VLOG_INFO, log_fmt, ##log_args);                                               \
+        DOCA_LOG_INFO(VLOG_INFO, log_fmt, ##log_args);                                             \
     } while (0)
 
 #if (MAX_DEFINED_LOG_LEVEL < DEFINED_VLOG_DETAILS)
@@ -129,7 +129,7 @@
 #define __log_details(log_fmt, log_args...)                                                        \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DETAILS)                                                       \
-            VLOG_PRINTF(VLOG_DETAILS, log_fmt, ##log_args);                                        \
+            DOCA_LOG_DBG(VLOG_DETAILS, log_fmt, ##log_args);                                       \
     } while (0)
 #endif
 
@@ -139,7 +139,7 @@
 #define __log_dbg(log_fmt, log_args...)                                                            \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DEBUG)                                                         \
-            VLOG_PRINTF(VLOG_DEBUG, log_fmt, ##log_args);                                          \
+            DOCA_LOG_DBG(VLOG_DEBUG, log_fmt, ##log_args);                                         \
     } while (0)
 #endif
 
@@ -149,7 +149,7 @@
 #define __log_fine(log_fmt, log_args...)                                                           \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINE)                                                          \
-            VLOG_PRINTF(VLOG_FINE, log_fmt, ##log_args);                                           \
+            DOCA_LOG_TRC(VLOG_FINE, log_fmt, ##log_args);                                          \
     } while (0)
 #endif
 
@@ -158,27 +158,27 @@
 #else
 #define __log_finer(log_fmt, log_args...)                                                          \
     do {                                                                                           \
-        if (g_vlogger_level >= VLOG_FINER)                                                         \
-            VLOG_PRINTF(VLOG_FINER, log_fmt, ##log_args);                                          \
+        if (g_vlogger_level >= VLOG_FINE)                                                          \
+            DOCA_LOG_TRC(VLOG_FINER, log_fmt, ##log_args);                                         \
     } while (0)
 #endif /* MAX_DEFINED_LOG_LEVEL */
 
 #define __log_info_panic(log_fmt, log_args...)                                                     \
     do {                                                                                           \
-        VLOG_PRINTF_INFO(VLOG_PANIC, log_fmt, ##log_args);                                         \
+        DOCA_LOG_INFO("PANIC" log_fmt, ##log_args);                                                \
         std::terminate();                                                                          \
     } while (0)
 #define __log_info_err(log_fmt, log_args...)                                                       \
     do {                                                                                           \
-        VLOG_PRINTF_INFO(VLOG_ERROR, log_fmt, ##log_args);                                         \
+        DOCA_LOG_INFO("ERROR" log_fmt, ##log_args);                                                \
     } while (0)
 #define __log_info_warn(log_fmt, log_args...)                                                      \
     do {                                                                                           \
-        VLOG_PRINTF_INFO(VLOG_WARNING, log_fmt, ##log_args);                                       \
+        DOCA_LOG_INFO("WARNING" log_fmt, ##log_args);                                              \
     } while (0)
 #define __log_info_info(log_fmt, log_args...)                                                      \
     do {                                                                                           \
-        VLOG_PRINTF_INFO(VLOG_INFO, log_fmt, ##log_args);                                          \
+        DOCA_LOG_INFO("INFO" log_fmt, ##log_args);                                                 \
     } while (0)
 
 #if (MAX_DEFINED_LOG_LEVEL < DEFINED_VLOG_DETAILS)
@@ -187,7 +187,7 @@
 #define __log_info_details(log_fmt, log_args...)                                                   \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DETAILS)                                                       \
-            VLOG_PRINTF_INFO(VLOG_DETAILS, log_fmt, ##log_args);                                   \
+            DOCA_LOG_INFO("DETAILS" log_fmt, ##log_args);                                          \
     } while (0)
 #endif
 
@@ -197,7 +197,7 @@
 #define __log_info_dbg(log_fmt, log_args...)                                                       \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DEBUG)                                                         \
-            VLOG_PRINTF_INFO(VLOG_DEBUG, log_fmt, ##log_args);                                     \
+            DOCA_LOG_INFO("DEBUG" log_fmt, ##log_args);                                            \
     } while (0)
 #endif
 
@@ -207,7 +207,7 @@
 #define __log_info_fine(log_fmt, log_args...)                                                      \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINE)                                                          \
-            VLOG_PRINTF_INFO(VLOG_FINE, log_fmt, ##log_args);                                      \
+            DOCA_LOG_INFO("FINE" log_fmt, ##log_args);                                             \
     } while (0)
 #endif
 
@@ -217,7 +217,7 @@
 #define __log_info_finer(log_fmt, log_args...)                                                     \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINER)                                                         \
-            VLOG_PRINTF_INFO(VLOG_FINER, log_fmt, ##log_args);                                     \
+            DOCA_LOG_INFO("FINER" log_fmt, ##log_args);                                            \
     } while (0)
 #endif /* MAX_DEFINED_LOG_LEVEL */
 
@@ -227,7 +227,7 @@
 #define __log_entry_dbg(log_fmt, log_args...)                                                      \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DEBUG)                                                         \
-            VLOG_PRINTF_ENTRY(VLOG_DEBUG, log_fmt, ##log_args);                                    \
+            DOCA_LOG_DBG(log_fmt, ##log_args);                                                     \
     } while (0)
 #endif
 
