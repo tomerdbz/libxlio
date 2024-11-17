@@ -36,7 +36,8 @@
 #include <cinttypes>
 #include "dev/rfs.h"
 
-#define MODULE_NAME "rfs_rule"
+DOCA_LOG_REGISTER(rfs_rule);
+#define MODULE_NAME "rfs_rule: "
 
 #define rfs_logpanic   __log_info_panic
 #define rfs_logerr     __log_info_err
@@ -56,9 +57,8 @@ rfs_rule::~rfs_rule()
     }
 }
 
-bool rfs_rule::create(doca_flow_match &match_value, doca_flow_match &match_mask,
-                      uint16_t rx_queue_id, uint16_t priority, uint32_t flow_tag,
-                      ib_ctx_handler &in_dev)
+bool rfs_rule::create(doca_flow_match &match_value, doca_flow_match &match_mask, uint16_t,
+                      uint16_t priority, uint32_t flow_tag, ib_ctx_handler &in_dev)
 {
     doca_flow_pipe *root_pipe = in_dev.get_doca_root_pipe();
     if (!root_pipe) {
@@ -133,8 +133,7 @@ bool rfs_rule::create(doca_flow_match &match_value, doca_flow_match &match_mask,
     all_fwd.rss.outer_flags |=
         (match_value.outer.l4_type_ext == DOCA_FLOW_L4_TYPE_EXT_TCP ? DOCA_FLOW_RSS_TCP
                                                                     : DOCA_FLOW_RSS_UDP);
-
-    doca_error_t rc = doca_flow_pipe_control_add_entry(
+    * / doca_error_t rc = doca_flow_pipe_control_add_entry(
         0, priority, root_pipe, &match_value, &match_mask, nullptr, actions, actions_mask, nullptr,
         nullptr, &all_fwd, nullptr, &m_doca_flow_entry);
     if (DOCA_IS_ERROR(rc)) {

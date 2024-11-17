@@ -36,7 +36,8 @@
 #include "dst_entry_udp.h"
 #include "sock/sockinfo.h"
 
-#define MODULE_NAME "dst_udp"
+DOCA_LOG_REGISTER(dst_udp);
+#define MODULE_NAME "dst_udp: "
 
 #define dst_udp_logpanic   __log_panic
 #define dst_udp_logerr     __log_err

@@ -44,7 +44,8 @@
 #include "xlio.h"
 #include <doca_mmap.h>
 
-#define MODULE_NAME "allocator"
+DOCA_LOG_REGISTER(allocator);
+#define MODULE_NAME "allocator: "
 
 // See description at the xlio_memory_cb_t definition.
 xlio_memory_cb_t g_user_memory_cb = nullptr;

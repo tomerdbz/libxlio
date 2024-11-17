@@ -38,6 +38,7 @@
 #include "config.h"
 #endif
 
+#include <doca_log.h>
 #include <iostream>
 #include <fstream>
 #include <time.h>
@@ -107,20 +108,20 @@
 
 #define __log_panic(log_fmt, log_args...)                                                          \
     do {                                                                                           \
-        DOCA_LOG_CRIT(VLOG_PANIC, log_fmt, ##log_args);                                            \
+        DOCA_LOG_CRIT(log_fmt, ##log_args);                                                        \
         std::terminate();                                                                          \
     } while (0)
 #define __log_err(log_fmt, log_args...)                                                            \
     do {                                                                                           \
-        DOCA_LOG_ERR(VLOG_ERROR, log_fmt, ##log_args);                                             \
+        DOCA_LOG_ERR(log_fmt, ##log_args);                                                         \
     } while (0)
 #define __log_warn(log_fmt, log_args...)                                                           \
     do {                                                                                           \
-        DOCA_LOG_WARN(VLOG_WARNING, log_fmt, ##log_args);                                          \
+        DOCA_LOG_WARN(log_fmt, ##log_args);                                                        \
     } while (0)
 #define __log_info(log_fmt, log_args...)                                                           \
     do {                                                                                           \
-        DOCA_LOG_INFO(VLOG_INFO, log_fmt, ##log_args);                                             \
+        DOCA_LOG_INFO(log_fmt, ##log_args);                                                        \
     } while (0)
 
 #if (MAX_DEFINED_LOG_LEVEL < DEFINED_VLOG_DETAILS)
@@ -129,7 +130,7 @@
 #define __log_details(log_fmt, log_args...)                                                        \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DETAILS)                                                       \
-            DOCA_LOG_DBG(VLOG_DETAILS, log_fmt, ##log_args);                                       \
+            DOCA_LOG_DBG(log_fmt, ##log_args);                                                     \
     } while (0)
 #endif
 
@@ -139,7 +140,7 @@
 #define __log_dbg(log_fmt, log_args...)                                                            \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DEBUG)                                                         \
-            DOCA_LOG_DBG(VLOG_DEBUG, log_fmt, ##log_args);                                         \
+            DOCA_LOG_DBG(log_fmt, ##log_args);                                                     \
     } while (0)
 #endif
 
@@ -149,7 +150,7 @@
 #define __log_fine(log_fmt, log_args...)                                                           \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINE)                                                          \
-            DOCA_LOG_TRC(VLOG_FINE, log_fmt, ##log_args);                                          \
+            DOCA_LOG_TRC(log_fmt, ##log_args);                                                     \
     } while (0)
 #endif
 
@@ -303,20 +304,20 @@ extern "C" {
 #endif //__cplusplus
 
 typedef enum {
-    VLOG_INIT = DEFINED_VLOG_INIT,
-    VLOG_NONE = DEFINED_VLOG_NONE,
-    VLOG_PANIC = DEFINED_VLOG_PANIC,
-    VLOG_ERROR = DEFINED_VLOG_ERROR,
-    VLOG_WARNING = DEFINED_VLOG_WARNING,
-    VLOG_INFO = DEFINED_VLOG_INFO,
+    VLOG_INIT = DOCA_LOG_LEVEL_DISABLE,
+    VLOG_NONE = DOCA_LOG_LEVEL_DISABLE,
+    VLOG_PANIC = DOCA_LOG_LEVEL_CRIT,
+    VLOG_ERROR = DOCA_LOG_LEVEL_ERROR,
+    VLOG_WARNING = DOCA_LOG_LEVEL_WARNING,
+    VLOG_INFO = DOCA_LOG_LEVEL_INFO,
     VLOG_DEFAULT = VLOG_INFO,
-    VLOG_DETAILS = DEFINED_VLOG_DETAILS,
-    VLOG_DEBUG = DEFINED_VLOG_DEBUG,
-    VLOG_FINE = DEFINED_VLOG_FINE,
+    VLOG_DETAILS = DOCA_LOG_LEVEL_DEBUG,
+    VLOG_DEBUG = DOCA_LOG_LEVEL_DEBUG,
+    VLOG_FINE = DOCA_LOG_LEVEL_TRACE,
     VLOG_FUNC = VLOG_FINE,
-    VLOG_FINER = DEFINED_VLOG_FINER,
+    VLOG_FINER = DOCA_LOG_LEVEL_TRACE,
     VLOG_FUNC_ALL = VLOG_FINER,
-    VLOG_ALL = DEFINED_VLOG_ALL /* last element */
+    VLOG_ALL = DOCA_LOG_LEVEL_TRACE /* last element */
 } vlog_levels_t;
 
 namespace log_level {

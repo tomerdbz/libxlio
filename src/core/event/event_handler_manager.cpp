@@ -46,7 +46,8 @@
 #include "core/sock/sockinfo_tcp.h"
 #include "core/util/instrumentation.h"
 
-#define MODULE_NAME "evh:"
+DOCA_LOG_REGISTER(evh);
+#define MODULE_NAME "evh: "
 
 #define evh_logpanic   __log_panic
 #define evh_logerr     __log_err
@@ -257,7 +258,7 @@ event_handler_manager::event_handler_manager(bool internal_thread_mode)
     , m_b_sysvar_internal_thread_arm_cq_enabled(safe_mce_sys().internal_thread_arm_cq_enabled)
     , m_n_sysvar_timer_resolution_msec(safe_mce_sys().timer_resolution_msec)
 {
-    evh_logfunc("");
+    evh_logfunc(" ");
 
     m_cq_epfd = 0;
     m_epfd = -1;
@@ -290,7 +291,7 @@ event_handler_manager::~event_handler_manager()
 
 void event_handler_manager::free_evh_resources()
 {
-    evh_logfunc("");
+    evh_logfunc(" ");
 
     // Flag thread to stop on next loop
     stop_thread();
@@ -521,7 +522,7 @@ void event_handler_manager::priv_unregister_all_handler_timers(timer_reg_info_t 
 
 void event_handler_manager::priv_prepare_ibverbs_async_event_queue(event_handler_map_t::iterator &i)
 {
-    evh_logdbg_entry("");
+    evh_logdbg_entry(" ");
 
     int cnt = 0;
     struct pollfd poll_fd = {/*.fd=*/0, /*.events=*/POLLIN, /*.revents=*/0};
@@ -778,7 +779,7 @@ void event_handler_manager::handle_registration_action(reg_action_t &reg_action)
 
 void event_handler_manager::query_for_ibverbs_event(int async_fd)
 {
-    evh_logfunc_entry("");
+    evh_logfunc_entry(" ");
 
     struct pollfd poll_fd;
     event_handler_map_t::iterator i;
@@ -830,7 +831,7 @@ void event_handler_manager::statistics_print(dump_type_t dump_type, int fd, vlog
 
 void event_handler_manager::process_ibverbs_event(event_handler_map_t::iterator &i)
 {
-    evh_logfunc_entry("");
+    evh_logfunc_entry(" ");
 
     //
     // Pre handling

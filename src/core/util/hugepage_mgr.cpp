@@ -47,7 +47,8 @@
 #include "vlogger/vlogger.h"
 #include "util/sys_vars.h"
 
-#define MODULE_NAME "hugepage_mgr"
+DOCA_LOG_REGISTER(hugepage_mgr);
+#define MODULE_NAME "hugepage_mgr: "
 
 hugepage_mgr g_hugepage_mgr;
 

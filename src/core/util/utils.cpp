@@ -74,7 +74,8 @@
 using namespace std;
 
 #undef MODULE_NAME
-#define MODULE_NAME "utils:"
+DOCA_LOG_REGISTER(utils);
+#define MODULE_NAME "utils: "
 
 int check_if_regular_file(char *path)
 {

@@ -40,7 +40,8 @@
 #include "sock/sock-app.h"
 #include "sock/sockinfo.h"
 
-#define MODULE_NAME "rfs_uc"
+DOCA_LOG_REGISTER(rfs_uc);
+#define MODULE_NAME "rfs_uc: "
 
 #define rfs_logpanic   __log_info_panic
 #define rfs_logerr     __log_info_err

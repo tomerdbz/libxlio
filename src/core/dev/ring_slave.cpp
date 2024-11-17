@@ -41,7 +41,8 @@
 #include "sock/sockinfo.h"
 
 #undef MODULE_NAME
-#define MODULE_NAME "ring_slave"
+DOCA_LOG_REGISTER(ring_slave);
+#define MODULE_NAME "ring_slave: "
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 

@@ -66,7 +66,8 @@
 
 /* useful debugging macros */
 
-#define MODULE_NAME "si_udp"
+DOCA_LOG_REGISTER(si_udp);
+#define MODULE_NAME "si_udp: "
 #undef MODULE_HDR_INFO
 #define MODULE_HDR_INFO MODULE_NAME "[fd=%d]:%d:%s() "
 #undef __INFO__
@@ -369,7 +370,7 @@ sockinfo_udp::sockinfo_udp(int fd, int domain)
     , m_is_connected(false)
     , m_multicast(false)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     assert(is_shadow_socket_present());
 
     m_protocol = PROTO_UDP;
@@ -411,7 +412,7 @@ sockinfo_udp::sockinfo_udp(int fd, int domain)
 
 sockinfo_udp::~sockinfo_udp()
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     g_global_stat_static.socket_udp_destructor_counter.fetch_add(1, std::memory_order_relaxed);
 
     // Remove all RX ready queue buffers (Push into reuse queue per ring)
@@ -490,7 +491,7 @@ int sockinfo_udp::bind_no_os()
 
 int sockinfo_udp::bind(const struct sockaddr *__addr, socklen_t __addrlen)
 {
-    si_udp_logdbg("");
+    si_udp_logdbg(" ");
 
     // We always call the orig_bind which will check sanity of the user socket api
     // and the OS will also allocate a specific port that we can also use
@@ -633,7 +634,7 @@ int sockinfo_udp::connect(const struct sockaddr *__to, socklen_t __tolen)
 
 int sockinfo_udp::shutdown(int __how)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     int ret = SYSCALL(shutdown, m_fd, __how);
     if (ret) {
         si_udp_logdbg("shutdown failed (ret=%d %m)", ret);
@@ -643,7 +644,7 @@ int sockinfo_udp::shutdown(int __how)
 
 int sockinfo_udp::accept(struct sockaddr *__addr, socklen_t *__addrlen)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     int ret = SYSCALL(accept, m_fd, __addr, __addrlen);
     if (ret < 0) {
         si_udp_logdbg("accept failed (ret=%d %m)", ret);
@@ -653,7 +654,7 @@ int sockinfo_udp::accept(struct sockaddr *__addr, socklen_t *__addrlen)
 
 int sockinfo_udp::accept4(struct sockaddr *__addr, socklen_t *__addrlen, int __flags)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     int ret = SYSCALL(accept4, m_fd, __addr, __addrlen, __flags);
     if (ret < 0) {
         si_udp_logdbg("accept4 failed (ret=%d %m)", ret);
@@ -663,7 +664,7 @@ int sockinfo_udp::accept4(struct sockaddr *__addr, socklen_t *__addrlen, int __f
 
 int sockinfo_udp::listen(int backlog)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     int ret = SYSCALL(listen, m_fd, backlog);
     if (ret < 0) {
         si_udp_logdbg("listen failed (ret=%d %m)", ret);
@@ -673,7 +674,7 @@ int sockinfo_udp::listen(int backlog)
 
 int sockinfo_udp::getsockname(struct sockaddr *__name, socklen_t *__namelen)
 {
-    si_udp_logdbg("");
+    si_udp_logdbg(" ");
 
     if (unlikely(m_state == SOCKINFO_DESTROYING) || unlikely(g_b_exit)) {
         errno = EINTR;
@@ -685,7 +686,7 @@ int sockinfo_udp::getsockname(struct sockaddr *__name, socklen_t *__namelen)
 
 int sockinfo_udp::getpeername(sockaddr *__name, socklen_t *__namelen)
 {
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
     int ret = SYSCALL(getpeername, m_fd, __name, __namelen);
     if (ret) {
         si_udp_logdbg("getpeername failed (ret=%d %m)", ret);
@@ -1738,7 +1739,7 @@ ssize_t sockinfo_udp::rx(const rx_call_t call_type, iovec *p_iov, ssize_t sz_iov
     int out_flags = 0;
     int in_flags = *p_flags;
 
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
 
     m_lock_rcv.lock();
 
@@ -1911,7 +1912,7 @@ void sockinfo_udp::unset_immediate_os_sample()
 
 bool sockinfo_udp::is_readable(bool check_only, fd_array_t *p_fd_ready_array)
 {
-    si_udp_logfuncall("");
+    si_udp_logfuncall(" ");
 
     // Check local list of ready rx packets
     // This is the quickest way back to the user with a ready packet (which will happen if we don't
@@ -1987,7 +1988,7 @@ bool sockinfo_udp::is_readable(bool check_only, fd_array_t *p_fd_ready_array)
 
 void sockinfo_udp::rx_request_notification()
 {
-    si_udp_logfuncall("");
+    si_udp_logfuncall(" ");
     m_rx_ring_map_lock.lock();
     for (rx_ring_map_t::iterator rx_ring_iter = m_rx_ring_map.begin();
          rx_ring_iter != m_rx_ring_map.end(); rx_ring_iter++) {
@@ -2012,7 +2013,7 @@ ssize_t sockinfo_udp::tx(xlio_tx_call_attr_t &tx_arg)
     dst_entry *p_dst_entry = m_p_connected_dst_entry; // Default for connected() socket but we'll
                                                       // update it on a specific sendTO(__to) call
 
-    si_udp_logfunc("");
+    si_udp_logfunc(" ");
 
     m_lock_snd.lock();
 
@@ -2426,7 +2427,7 @@ bool sockinfo_udp::rx_input_cb(mem_buf_desc_t *p_desc, void *pv_fd_ready_array)
 
 void sockinfo_udp::rx_add_ring_cb(ring *p_ring)
 {
-    si_udp_logdbg("");
+    si_udp_logdbg(" ");
     sockinfo::rx_add_ring_cb(p_ring);
 
     // Now that we got at least 1 CQ attached enable the skip os mechanism.
@@ -2442,7 +2443,7 @@ void sockinfo_udp::rx_add_ring_cb(ring *p_ring)
 
 void sockinfo_udp::rx_del_ring_cb(ring *p_ring)
 {
-    si_udp_logdbg("");
+    si_udp_logdbg(" ");
 
     sockinfo::rx_del_ring_cb(p_ring);
 

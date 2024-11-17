@@ -42,7 +42,8 @@
 
 #include <netinet/ip6.h>
 
-#define MODULE_NAME "cq_mgr_rx_regrq"
+DOCA_LOG_REGISTER(cq_mgr_rx_regrq);
+#define MODULE_NAME "cq_mgr_rx_regrq: "
 
 #define cq_logfunc    __log_info_func
 #define cq_logdbg     __log_info_dbg
@@ -57,7 +58,7 @@ cq_mgr_rx_regrq::cq_mgr_rx_regrq(ring_simple *p_ring, hw_queue_rx *hqrx_ptr,
                                  struct ibv_comp_channel *p_comp_event_channel)
     : cq_mgr_rx(p_ring, hqrx_ptr, p_ib_ctx_handler, cq_size, p_comp_event_channel)
 {
-    cq_logfunc("");
+    cq_logfunc(" ");
 }
 
 uint32_t cq_mgr_rx_regrq::clean_cq()
@@ -273,7 +274,7 @@ int cq_mgr_rx_regrq::drain_and_proccess(uintptr_t *p_recycle_buffers_last_wr_id 
 
 bool cq_mgr_rx_regrq::poll_and_process_element_rx(void *pv_fd_ready_array)
 {
-    cq_logfuncall("");
+    cq_logfuncall(" ");
 
     if (unlikely(m_n_sysvar_cq_poll_batch_max <= process_recv_queue(pv_fd_ready_array))) {
         m_p_ring->m_gro_mgr.flush_all(pv_fd_ready_array);

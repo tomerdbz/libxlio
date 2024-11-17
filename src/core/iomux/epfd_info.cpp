@@ -34,7 +34,8 @@
 #include <sock/fd_collection.h>
 #include <iomux/epfd_info.h>
 
-#define MODULE_NAME "epfd_info:"
+DOCA_LOG_REGISTER(epfd_info);
+#define MODULE_NAME "epfd_info: "
 
 #define SUPPORTED_EPOLL_EVENTS                                                                     \
     (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP | EPOLLONESHOT | EPOLLET)
@@ -61,7 +62,7 @@ epfd_info::epfd_info(int epfd, int size)
     , m_size(size)
     , m_ring_map_lock("epfd_ring_map_lock")
 {
-    __log_funcall("");
+    __log_funcall(" ");
     int max_sys_fd = get_sys_max_fd_num();
     if (m_size <= max_sys_fd) {
         m_size = max_sys_fd;
@@ -92,7 +93,7 @@ epfd_info::epfd_info(int epfd, int size)
 
 epfd_info::~epfd_info()
 {
-    __log_funcall("");
+    __log_funcall(" ");
     sockinfo *sock_fd;
 
     // Meny: going over all handled fds and removing epoll context.
@@ -602,7 +603,7 @@ epoll_stats_t *epfd_info::stats()
 
 bool epfd_info::ring_poll_and_process_element(void *pv_fd_ready_array /* = NULL*/)
 {
-    __log_func("");
+    __log_func(" ");
 
     if (m_ring_map.empty()) {
         return true;
@@ -623,7 +624,7 @@ bool epfd_info::ring_poll_and_process_element(void *pv_fd_ready_array /* = NULL*
 
 bool epfd_info::ring_request_notification()
 {
-    __log_func("");
+    __log_func(" ");
     int ret_total = 0;
 
     if (m_ring_map.empty()) {
@@ -647,7 +648,7 @@ bool epfd_info::ring_request_notification()
 
 void epfd_info::ring_clear_rx_notification()
 {
-    __log_func("");
+    __log_func(" ");
     lock();
 
     while (!m_ready_cq_fd_q.empty()) {

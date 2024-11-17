@@ -386,7 +386,7 @@ public:
     }
 
 protected:
-    void SetUp() override { out.str(""); }
+    void SetUp() override { out.str(" "); }
 };
 
 #ifdef DEFINED_UTLS
@@ -425,7 +425,7 @@ TEST_F(stats_base, socket_listen_counter_resenter_entry_delta_mode)
 
     ASSERT_NE(out.str().find("22,35,57,92,149,241,390,21,34,55,89,144,233,377"), std::string::npos)
         << out.str();
-    out.str("");
+    out.str(" ");
     out << repr.update(&mem);
     ASSERT_NE(out.str().find("0,0,0,0,0,0,0,0,0,0,0,0,0,0"), std::string::npos) << out.str();
 }
@@ -436,7 +436,7 @@ TEST_F(stats_base, socket_listen_counter_resenter_entry_total_mode)
     out << repr.update(&mem);
     ASSERT_NE(out.str().find("22,35,57,92,149,241,390,21,34,55,89,144,233,377"), std::string::npos)
         << out.str();
-    out.str("");
+    out.str(" ");
     out << repr.update(&mem);
     ASSERT_NE(out.str().find("22,35,57,92,149,241,390,21,34,55,89,144,233,377"), std::string::npos)
         << out.str();

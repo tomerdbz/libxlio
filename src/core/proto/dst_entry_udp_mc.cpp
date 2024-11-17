@@ -33,7 +33,8 @@
 
 #include "dst_entry_udp_mc.h"
 
-#define MODULE_NAME "dst_mc"
+DOCA_LOG_REGISTER(dst_mc);
+#define MODULE_NAME "dst_mc: "
 
 #define dst_udp_mc_logpanic   __log_panic
 #define dst_udp_mc_logerr     __log_err

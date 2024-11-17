@@ -50,7 +50,8 @@
 #include "core/util/agent.h"
 
 #undef MODULE_NAME
-#define MODULE_NAME "agent:"
+DOCA_LOG_REGISTER(agent);
+#define MODULE_NAME "agent: "
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 

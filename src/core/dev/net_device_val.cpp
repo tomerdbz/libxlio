@@ -60,7 +60,8 @@
 #include "dev/net_device_table_mgr.h"
 #include "proto/neighbour_table_mgr.h"
 
-#define MODULE_NAME "ndv"
+DOCA_LOG_REGISTER(ndv);
+#define MODULE_NAME "ndv: "
 
 #define nd_logpanic   __log_panic
 #define nd_logerr     __log_err
@@ -561,7 +562,7 @@ void net_device_val::set_slave_array()
 {
     char active_slave[IFNAMSIZ] = {0}; // gather the slave data (only for active-backup)-
 
-    nd_logdbg("");
+    nd_logdbg(" ");
 
     if (m_bond == NO_BOND) {
         slave_data_t *s = new slave_data_t(if_nametoindex(get_ifname()));
@@ -979,7 +980,7 @@ const std::string net_device_val::to_str() const
 
 ring *net_device_val::reserve_ring(resource_allocation_key *key)
 {
-    nd_logfunc("");
+    nd_logfunc(" ");
     std::lock_guard<decltype(m_lock)> lock(m_lock);
     key = ring_key_redirection_reserve(key);
     ring *the_ring = nullptr;
@@ -1028,7 +1029,7 @@ ring *net_device_val::reserve_ring(resource_allocation_key *key)
 
 int net_device_val::release_ring(resource_allocation_key *key)
 {
-    nd_logfunc("");
+    nd_logfunc(" ");
 
     resource_allocation_key *red_key;
 
@@ -1153,7 +1154,7 @@ void net_device_val::ring_key_redirection_release(resource_allocation_key *key)
 
 bool net_device_val::global_ring_poll_and_process_element(void *pv_fd_ready_array /*=NULL*/)
 {
-    nd_logfuncall("");
+    nd_logfuncall(" ");
     bool all_drained = true;
     std::lock_guard<decltype(m_lock)> lock(m_lock);
     rings_hash_map_t::iterator ring_iter;

@@ -78,7 +78,8 @@ typedef struct {
 
 typedef enum { e_K = 1024, e_M = 1048576 } units_t;
 
-#define MODULE_NAME                   "xliostat"
+#define MODULE_NAME "xliostat"
+DOCA_LOG_REGISTER(xliostat);
 #define PRODUCT_NAME                  "XLIO"
 #define log_msg(log_fmt, log_args...) printf(MODULE_NAME ": " log_fmt "\n", ##log_args)
 #define log_err(log_fmt, log_args...) fprintf(stderr, MODULE_NAME ": " log_fmt "\n", ##log_args)

@@ -36,7 +36,8 @@
 #include "mem_desc.h"
 #include <netinet/tcp.h>
 
-#define MODULE_NAME "dst_tcp"
+DOCA_LOG_REGISTER(dst_tcp);
+#define MODULE_NAME "dst_tcp: "
 
 #define dst_tcp_logpanic   __log_panic
 #define dst_tcp_logerr     __log_err

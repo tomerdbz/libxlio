@@ -38,7 +38,8 @@
 #include "sock/sock-app.h"
 #include <cinttypes>
 
-#define MODULE_NAME "rfs"
+DOCA_LOG_REGISTER(rfs);
+#define MODULE_NAME "rfs: "
 
 #define rfs_logpanic   __log_info_panic
 #define rfs_logerr     __log_info_err

@@ -41,7 +41,8 @@
 #include "util/sys_vars.h"
 #include "proto/mem_buf_desc.h"
 
-#define MODULE_NAME "bpool"
+DOCA_LOG_REGISTER(bpool);
+#define MODULE_NAME "bpool: "
 
 // A pointer to differentiate between g_buffer_pool_rx_stride and g_buffer_pool_rx_rwqe
 // and create an abstraction to the layers above device layer for cases when Striding RQ is on/off.

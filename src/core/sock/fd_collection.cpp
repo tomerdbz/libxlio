@@ -43,7 +43,8 @@
 #include "iomux/epfd_info.h"
 
 #undef MODULE_NAME
-#define MODULE_NAME "fdc:"
+DOCA_LOG_REGISTER(fdc);
+#define MODULE_NAME "fdc: "
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 
@@ -67,7 +68,7 @@ fd_collection::fd_collection()
     , m_socket_pool_counter(0)
 #endif
 {
-    fdcoll_logfunc("");
+    fdcoll_logfunc(" ");
 
     m_n_fd_map_size = 1024;
     struct rlimit rlim;
@@ -88,7 +89,7 @@ fd_collection::fd_collection()
 
 fd_collection::~fd_collection()
 {
-    fdcoll_logfunc("");
+    fdcoll_logfunc(" ");
 
     clear();
     m_n_fd_map_size = -1;
@@ -164,7 +165,7 @@ void fd_collection::clear_sockets()
 // termination of DOCA flow and fd_collection destructor.
 void fd_collection::clear()
 {
-    fdcoll_logfunc("");
+    fdcoll_logfunc(" ");
 
     lock();
 

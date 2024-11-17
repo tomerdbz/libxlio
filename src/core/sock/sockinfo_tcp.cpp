@@ -63,7 +63,8 @@
     unlock_tcp_con();                                                                              \
     return _ret;
 // debugging macros
-#define MODULE_NAME "si_tcp"
+DOCA_LOG_REGISTER(si_tcp);
+#define MODULE_NAME "si_tcp: "
 
 #undef MODULE_HDR_INFO
 #define MODULE_HDR_INFO MODULE_NAME "[fd=%d]:%d:%s() "
@@ -297,7 +298,7 @@ sockinfo_tcp::sockinfo_tcp(int fd, int domain)
     , m_tcp_seg_list(nullptr)
     , m_user_huge_page_mask(~((uint64_t)safe_mce_sys().user_huge_page_size - 1))
 {
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     m_ops = m_ops_tcp = new sockinfo_tcp_ops(this);
     assert(m_ops != NULL); /* XXX */
@@ -526,7 +527,7 @@ void sockinfo_tcp::err_lwip_cb_xlio_socket(void *pcb_container, err_t err)
 
 sockinfo_tcp::~sockinfo_tcp()
 {
-    si_tcp_logfunc("");
+    si_tcp_logfunc(" ");
     g_global_stat_static.socket_tcp_destructor_counter.fetch_add(1, std::memory_order_relaxed);
 
     lock_tcp_con();
@@ -662,7 +663,7 @@ bool sockinfo_tcp::prepare_listen_to_close()
 
 bool sockinfo_tcp::prepare_to_close(bool process_shutdown /* = false */)
 {
-    si_tcp_logdbg("");
+    si_tcp_logdbg(" ");
 
     lock_tcp_con();
 
@@ -1699,7 +1700,7 @@ bool sockinfo_tcp::process_peer_ctl_packets(xlio_desc_list_t &peer_packets)
 
 void sockinfo_tcp::process_my_ctl_packets()
 {
-    si_tcp_logfunc("");
+    si_tcp_logfunc(" ");
 
     // 0. fast swap of m_rx_ctl_packets_list with temp_list under lock
     xlio_desc_list_t temp_list;
@@ -1840,7 +1841,7 @@ void sockinfo_tcp::process_reuse_ctl_packets()
 
 void sockinfo_tcp::process_rx_ctl_packets()
 {
-    si_tcp_logfunc("");
+    si_tcp_logfunc(" ");
 
     process_my_ctl_packets();
     process_children_ctl_packets();
@@ -1850,7 +1851,7 @@ void sockinfo_tcp::process_rx_ctl_packets()
 // Execute TCP timers of this connection
 void sockinfo_tcp::handle_timer_expired()
 {
-    si_tcp_logfunc("");
+    si_tcp_logfunc(" ");
 
     if (tcp_ctl_thread_on(safe_mce_sys().tcp_ctl_thread)) {
         process_rx_ctl_packets();
@@ -2187,7 +2188,7 @@ ssize_t sockinfo_tcp::rx(const rx_call_t call_type, iovec *p_iov, ssize_t sz_iov
 
     m_loops_timer.start();
 
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
     if (unlikely(m_sock_offload != TCP_SOCK_LWIP)) {
         int ret = 0;
         ret = rx_os(call_type, p_iov, sz_iov, in_flags, __from, __fromlen, __msg);
@@ -2612,7 +2613,7 @@ int sockinfo_tcp::connect(const sockaddr *__to, socklen_t __tolen)
 
 int sockinfo_tcp::bind(const sockaddr *__addr, socklen_t __addrlen)
 {
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     int ret = 0;
 
@@ -2729,7 +2730,7 @@ int sockinfo_tcp::prepareListen()
     transport_t target_family;
     sock_addr addr;
     socklen_t addr_len;
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     if (m_sock_offload == TCP_SOCK_PASSTHROUGH) {
         return 1; // passthrough
@@ -2792,7 +2793,7 @@ int sockinfo_tcp::prepareListen()
 
 int sockinfo_tcp::listen(int backlog)
 {
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     int orig_backlog = backlog;
 
@@ -2924,7 +2925,7 @@ int sockinfo_tcp::accept_helper(struct sockaddr *__addr, socklen_t *__addrlen,
     int poll_count = safe_mce_sys().rx_poll_num; // do one poll and go to sleep (if blocking)
     int ret;
 
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     // if in os pathrough just redirect to os
     if (m_sock_offload == TCP_SOCK_PASSTHROUGH) {
@@ -3077,14 +3078,14 @@ int sockinfo_tcp::accept_helper(struct sockaddr *__addr, socklen_t *__addrlen,
 
 int sockinfo_tcp::accept(struct sockaddr *__addr, socklen_t *__addrlen)
 {
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     return accept_helper(__addr, __addrlen);
 }
 
 int sockinfo_tcp::accept4(struct sockaddr *__addr, socklen_t *__addrlen, int __flags)
 {
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
     si_tcp_logdbg("socket accept4, flags=%d", __flags);
 
     return accept_helper(__addr, __addrlen, __flags);
@@ -3596,7 +3597,7 @@ int sockinfo_tcp::wait_for_conn_ready_blocking()
 {
     int poll_count = 0;
 
-    si_tcp_logfuncall("");
+    si_tcp_logfuncall(" ");
 
     while (m_conn_state == TCP_CONN_CONNECTING && m_sock_state != TCP_SOCK_INITED) {
         /*In case of connect error err_lwip_cb is called and not connect_lwip_cb
@@ -4803,7 +4804,7 @@ int sockinfo_tcp::getsockopt(int __level, int __optname, void *__optval, socklen
 
 int sockinfo_tcp::getsockname(sockaddr *__name, socklen_t *__namelen)
 {
-    __log_info_func("");
+    __log_info_func(" ");
 
     if (m_sock_offload == TCP_SOCK_PASSTHROUGH) {
         si_tcp_logdbg("passthrough - go to OS getsockname");
@@ -4826,7 +4827,7 @@ int sockinfo_tcp::getsockname(sockaddr *__name, socklen_t *__namelen)
 
 int sockinfo_tcp::getpeername(sockaddr *__name, socklen_t *__namelen)
 {
-    __log_info_func("");
+    __log_info_func(" ");
 
     if (m_sock_offload == TCP_SOCK_PASSTHROUGH) {
         si_tcp_logdbg("passthrough - go to OS getpeername");
@@ -4860,7 +4861,7 @@ int sockinfo_tcp::rx_wait_helper(int &poll_count, bool blocking)
     epoll_event rx_epfd_events[SI_RX_EPFD_EVENT_MAX];
 
     // poll for completion
-    __log_info_func("");
+    __log_info_func(" ");
     poll_count++;
     // if in listen state go directly to wait part
 

@@ -46,7 +46,8 @@
 #include "fd_collection.h"
 #include "dev/ring_simple.h"
 
-#define MODULE_NAME "si"
+DOCA_LOG_REGISTER(si);
+#define MODULE_NAME "si: "
 #undef MODULE_HDR_INFO
 #define MODULE_HDR_INFO MODULE_NAME "[fd=%d]:%d:%s() "
 #undef __INFO__
@@ -1526,7 +1527,7 @@ void sockinfo::remove_cqfd_from_sock_rx_epfd(ring *base_ring)
 
 void sockinfo::rx_add_ring_cb(ring *p_ring)
 {
-    si_logdbg("");
+    si_logdbg(" ");
 
     bool notify_epoll = false;
 
@@ -1590,7 +1591,7 @@ void sockinfo::rx_add_ring_cb(ring *p_ring)
 
 void sockinfo::rx_del_ring_cb(ring *p_ring)
 {
-    si_logdbg("");
+    si_logdbg(" ");
 
     bool notify_epoll = false;
 

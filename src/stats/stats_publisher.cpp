@@ -40,6 +40,7 @@
 #include "core/sock/sock-redirect.h"
 #include "core/event/event_handler_manager.h"
 
+DOCA_LOG_REGISTER(STATS);
 #define MODULE_NAME "STATS: "
 
 static lock_spin g_lock_mc_info("g_lock_mc_info");

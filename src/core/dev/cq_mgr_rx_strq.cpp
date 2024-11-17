@@ -41,7 +41,8 @@
 #include "ring_simple.h"
 #include <cinttypes>
 
-#define MODULE_NAME "cq_mgr_rx_strq"
+DOCA_LOG_REGISTER(cq_mgr_rx_strq);
+#define MODULE_NAME "cq_mgr_rx_strq: "
 
 #define cq_logfunc    __log_info_func
 #define cq_logdbg     __log_info_dbg
@@ -65,7 +66,7 @@ cq_mgr_rx_strq::cq_mgr_rx_strq(ring_simple *p_ring, hw_queue_rx *hqrx_ptr,
     , _strides_num(strides_num)
     , _wqe_buff_size_bytes(strides_num * stride_size_bytes)
 {
-    cq_logfunc("");
+    cq_logfunc(" ");
     m_n_sysvar_rx_prefetch_bytes_before_poll =
         std::min(m_n_sysvar_rx_prefetch_bytes_before_poll, stride_size_bytes);
 
@@ -74,7 +75,7 @@ cq_mgr_rx_strq::cq_mgr_rx_strq(ring_simple *p_ring, hw_queue_rx *hqrx_ptr,
 
 cq_mgr_rx_strq::~cq_mgr_rx_strq()
 {
-    cq_logfunc("");
+    cq_logfunc(" ");
     cq_logdbg("destroying CQ STRQ");
 
     if (m_rx_queue.size()) {
@@ -409,7 +410,7 @@ mem_buf_desc_t *cq_mgr_rx_strq::process_strq_cq_element_rx(mem_buf_desc_t *p_mem
                                                            enum buff_status_e status)
 {
     /* Assume locked!!! */
-    cq_logfuncall("");
+    cq_logfuncall(" ");
 
     if (unlikely(status != BS_OK)) {
         reclaim_recv_buffer_helper(p_mem_buf_desc);
@@ -427,7 +428,7 @@ mem_buf_desc_t *cq_mgr_rx_strq::process_strq_cq_element_rx(mem_buf_desc_t *p_mem
 
 bool cq_mgr_rx_strq::poll_and_process_element_rx(void *pv_fd_ready_array)
 {
-    cq_logfuncall("");
+    cq_logfuncall(" ");
 
     if (unlikely(m_n_sysvar_cq_poll_batch_max <= process_recv_queue(pv_fd_ready_array))) {
         m_p_ring->m_gro_mgr.flush_all(pv_fd_ready_array);
@@ -470,7 +471,7 @@ bool cq_mgr_rx_strq::poll_and_process_element_rx(void *pv_fd_ready_array)
 
 void cq_mgr_rx_strq::add_hqrx()
 {
-    cq_logfunc("");
+    cq_logfunc(" ");
     _hot_buffer_stride = nullptr;
     _current_wqe_consumed_bytes = 0U;
     cq_mgr_rx::add_hqrx();

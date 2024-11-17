@@ -44,7 +44,8 @@
 #define DM_ALIGN_SIZE(size, mask) ((size + mask) & (~mask))
 
 #undef MODULE_NAME
-#define MODULE_NAME "dm_mgr"
+DOCA_LOG_REGISTER(dm_mgr);
+#define MODULE_NAME "dm_mgr: "
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 

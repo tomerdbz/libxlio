@@ -40,7 +40,8 @@
 #include <errno.h>
 #include <sys/socket.h>
 
-#define MODULE_NAME "si_ulp"
+DOCA_LOG_REGISTER(si_ulp);
+#define MODULE_NAME "si_ulp: "
 
 #define si_ulp_logdbg  __log_info_dbg
 #define si_ulp_loginfo __log_info_info

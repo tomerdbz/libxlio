@@ -39,6 +39,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <doca_log.h>
 #include <errno.h>
 #include <fcntl.h>
 
@@ -251,7 +252,7 @@ void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char
         g_vlogger_fd = open(local_log_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (g_vlogger_fd < 0) {
             vlog_printf(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
-            exit(1);
+            std::terminate();
         }
         g_vlogger_file = fdopen(g_vlogger_fd, "w");
 
@@ -259,10 +260,26 @@ void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char
         if (g_vlogger_file == NULL) {
             g_vlogger_file = stderr;
             vlog_printf(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
-            exit(1);
+            std::terminate();
         }
         BULLSEYE_EXCLUDE_BLOCK_END
     }
+
+    /*struct doca_log_backend *g_logger_backend = nullptr;
+    const doca_error_t backend_create_status =
+        doca_log_backend_create_with_file_sdk(g_vlogger_file, &g_logger_backend);
+
+    if (backend_create_status != DOCA_SUCCESS) {
+        VPRINT_DOCA_ERR(VLOG_PANIC, backend_create_status, "doca_log_backend_create_with_file_sdk");
+        std::terminate();
+    }
+
+    const doca_error_t backend_set_level_status =
+        doca_log_backend_set_sdk_level(g_logger_backend, log_level);
+    if (backend_set_level_status != DOCA_SUCCESS) {
+        VPRINT_DOCA_ERR(VLOG_PANIC, backend_set_level_status, "doca_log_backend_set_sdk_level");
+        std::terminate();
+    }*/
 
     g_vlogger_level = log_level;
     g_p_vlogger_level = &g_vlogger_level;

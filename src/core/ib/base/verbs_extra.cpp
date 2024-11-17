@@ -40,7 +40,8 @@
 #include "util/valgrind.h"
 
 #undef MODULE_NAME
-#define MODULE_NAME "verbs_extra:"
+DOCA_LOG_REGISTER(verbs_extra);
+#define MODULE_NAME "verbs_extra: "
 
 // See - IB Arch Spec - 11.6.2 COMPLETION RETURN STATUS
 const char *priv_ibv_wc_status_str(enum ibv_wc_status status)

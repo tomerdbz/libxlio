@@ -39,6 +39,8 @@
 #include <string.h>
 
 #define MODULE_NAME "SM_TEST: "
+DOCA_LOG_REGISTER(SM_TEST);
+#define MODULE_NAME "SM_TEST: "
 
 #define NOT_IN_USE(a) ((void)(a))
 

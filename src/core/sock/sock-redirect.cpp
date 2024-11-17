@@ -69,7 +69,8 @@
 
 using namespace std;
 
-#define MODULE_NAME "srdr:"
+DOCA_LOG_REGISTER(srdr);
+#define MODULE_NAME "srdr: "
 
 #define srdr_logpanic   __log_panic
 #define srdr_logerr     __log_err
@@ -860,7 +861,7 @@ EXPORT_SYMBOL void XLIO_SYMBOL(__res_iclose)(res_state statp, bool free_addr)
        fd. This will break the socket functionality.
        Assume that resolver doesn't use the above scenarios.  */
 
-    srdr_logdbg_entry("");
+    srdr_logdbg_entry(" ");
     for (int ns = 0; ns < statp->_u._ext.nscount; ns++) {
         int sock = statp->_u._ext.nssocks[ns];
         if (sock != -1) {

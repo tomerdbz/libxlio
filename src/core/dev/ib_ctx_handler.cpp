@@ -47,7 +47,8 @@
 #include "event/event_handler_manager.h"
 #include "sock/sock-app.h"
 
-#define MODULE_NAME "ibch"
+DOCA_LOG_REGISTER(ibch);
+#define MODULE_NAME "ibch: "
 
 #define ibch_logpanic   __log_panic
 #define ibch_logerr     __log_err
