@@ -156,7 +156,7 @@
         if (daemon_cfg.opt.log_level > 5)                                                          \
             sys_log(LOG_INFO, "[TRACE ] " fmt, ##__VA_ARGS__);                                     \
     } while (0)
-
+*/
 /**
  * @struct module_cfg
  * @brief Configuration parameters in global values

@@ -36,8 +36,8 @@
 #include "net_device_table_mgr.h"
 #include "vlogger/vlogger.h"
 
+#define MODULE_NAME "src_sel"
 DOCA_LOG_REGISTER(src_sel);
-#define MODULE_NAME "src_sel: "
 
 #define src_sel_logfunc __log_func
 

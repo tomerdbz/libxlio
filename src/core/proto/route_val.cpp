@@ -36,8 +36,8 @@
 #include "route_val.h"
 #include "core/dev/net_device_table_mgr.h"
 
+#define MODULE_NAME "rtv"
 DOCA_LOG_REGISTER(rtv);
-#define MODULE_NAME "rtv: "
 
 #define rt_val_loginfo __log_info_info
 #define rt_val_logdbg  __log_info_dbg

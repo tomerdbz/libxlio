@@ -43,8 +43,8 @@
 
 #ifdef DEFINED_IBV_CLOCK_INFO
 
+#define MODULE_NAME "tc_ptp"
 DOCA_LOG_REGISTER(tc_ptp);
-#define MODULE_NAME "tc_ptp: "
 
 #define ibchtc_logerr  __log_err
 #define ibchtc_logwarn __log_warn

@@ -43,8 +43,8 @@
 #include "ib/base/verbs_extra.h"
 #include "dev/net_device_table_mgr.h"
 
+#define MODULE_NAME "time_converter"
 DOCA_LOG_REGISTER(time_converter);
-#define MODULE_NAME "time_converter: "
 
 #define ibchtc_logerr  __log_err
 #define ibchtc_logwarn __log_warn

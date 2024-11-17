@@ -36,8 +36,8 @@
 #include "dst_entry_udp.h"
 #include "sock/sockinfo.h"
 
+#define MODULE_NAME "dst_udp"
 DOCA_LOG_REGISTER(dst_udp);
-#define MODULE_NAME "dst_udp: "
 
 #define dst_udp_logpanic   __log_panic
 #define dst_udp_logerr     __log_err
@@ -155,8 +155,8 @@ bool dst_entry_udp::fast_send_fragmented_ipv6(mem_buf_desc_t *p_mem_buf_desc, co
             memcpy_fromiovec(p_payload, p_iov, sz_iov, sz_user_data_offset, sz_user_data_to_copy);
         BULLSEYE_EXCLUDE_BLOCK_START
         if (ret != (int)sz_user_data_to_copy) {
-            vlog_printf(VLOG_ERROR, "memcpy_fromiovec error (sz_user_data_to_copy=%zu, ret=%d)\n",
-                        sz_user_data_to_copy, ret);
+            __log_raw(VLOG_ERROR, "memcpy_fromiovec error (sz_user_data_to_copy=%zu, ret=%d)\n",
+                      sz_user_data_to_copy, ret);
             p_ring->mem_buf_tx_release(p_mem_buf_desc, true);
             return false;
         }
@@ -171,9 +171,9 @@ bool dst_entry_udp::fast_send_fragmented_ipv6(mem_buf_desc_t *p_mem_buf_desc, co
         p_sge[0].lkey = p_ring->get_tx_lkey(user_id);
         p_send_wqe->wr_id = (uintptr_t)p_mem_buf_desc;
 
-        vlog_printf(VLOG_DEBUG, "packet_sz=%d, payload_sz=%zu, ip_offset=%u id=%u\n",
-                    p_sge[0].length - p_header->m_transport_header_len, sz_user_data_to_copy,
-                    n_ip_frag_offset, ntohl(packet_id));
+        __log_raw(VLOG_DEBUG, "packet_sz=%d, payload_sz=%zu, ip_offset=%u id=%u\n",
+                  p_sge[0].length - p_header->m_transport_header_len, sz_user_data_to_copy,
+                  n_ip_frag_offset, ntohl(packet_id));
 
         tmp = p_mem_buf_desc->p_next_desc;
         p_mem_buf_desc->p_next_desc = nullptr;

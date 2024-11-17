@@ -35,8 +35,8 @@
 #include "vlogger/vlogger.h"
 #include "core/infra/subject_observer.h"
 
+#define MODULE_NAME "subject_observer"
 DOCA_LOG_REGISTER(subject_observer);
-#define MODULE_NAME "subject_observer: "
 
 #define sub_obs_logerr     __log_info_err
 #define sub_obs_logwarn    __log_info_warn

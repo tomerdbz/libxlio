@@ -42,8 +42,8 @@
 #include "core/event/netlink_event.h"
 
 extern uint8_t g_vlogger_level;
+#define MODULE_NAME "NETLINK_TEST"
 DOCA_LOG_REGISTER(NETLINK_TEST);
-#define MODULE_NAME "NETLINK_TEST: "
 
 class neigh_observer : public observer {
     virtual void notify_cb(event *ev)

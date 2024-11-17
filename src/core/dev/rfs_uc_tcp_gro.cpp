@@ -38,8 +38,8 @@
 #include <netinet/ip6.h>
 #include <sock/sockinfo_tcp.h>
 
+#define MODULE_NAME "rfs_uc_tcp_gro"
 DOCA_LOG_REGISTER(rfs_uc_tcp_gro);
-#define MODULE_NAME "rfs_uc_tcp_gro: "
 
 #define rfs_logpanic __log_info_panic
 

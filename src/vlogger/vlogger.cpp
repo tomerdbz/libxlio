@@ -61,6 +61,13 @@ uint32_t g_vlogger_usec_on_startup = 0;
 bool g_vlogger_log_in_colors = MCE_DEFAULT_LOG_COLORS;
 xlio_log_cb_t g_vlogger_cb = NULL;
 
+DOCA_LOG_REGISTER(logger);
+
+int get_header_source()
+{
+    return log_source;
+}
+
 namespace log_level {
 typedef struct {
     vlog_levels_t level;
@@ -111,7 +118,7 @@ vlog_levels_t from_str(const char *str, vlog_levels_t def_value)
                     return levels[i].level;
                 }
                 def_value = (vlog_levels_t)(MAX_DEFINED_LOG_LEVEL);
-                vlog_printf(VLOG_WARNING, "Trace level set to max level %s\n", to_str(def_value));
+                __log_raw(VLOG_WARNING, "Trace level set to max level %s\n", to_str(def_value));
                 return def_value;
             }
             input_name++;
@@ -133,13 +140,13 @@ vlog_levels_t from_int(const int int_log, vlog_levels_t def_value)
 const char *to_str(vlog_levels_t level)
 {
     static int base = VLOG_NONE;
-    return levels[level - base].output_name;
+    return levels[(level - base) / 10].output_name;
 }
 
 const char *get_color(vlog_levels_t level)
 {
     static int base = VLOG_NONE;
-    return levels[level - base].output_color;
+    return levels[(level - base) / 10].output_color;
 }
 } // namespace log_level
 
@@ -234,87 +241,8 @@ static xlio_log_cb_t xlio_log_get_cb_func()
     return log_cb;
 }
 
-void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char *log_filename,
-                int log_details, bool log_in_colors)
-{
-    g_vlogger_file = stderr;
-
-    g_vlogger_cb = xlio_log_get_cb_func();
-
-    strncpy(g_vlogger_module_name, log_module_name, sizeof(g_vlogger_module_name) - 1);
-    g_vlogger_module_name[sizeof(g_vlogger_module_name) - 1] = '\0';
-
-    vlog_get_usec_since_start();
-
-    char local_log_filename[255];
-    if (log_filename != NULL && strcmp(log_filename, "")) {
-        sprintf(local_log_filename, "%s", log_filename);
-        g_vlogger_fd = open(local_log_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (g_vlogger_fd < 0) {
-            vlog_printf(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
-            std::terminate();
-        }
-        g_vlogger_file = fdopen(g_vlogger_fd, "w");
-
-        BULLSEYE_EXCLUDE_BLOCK_START
-        if (g_vlogger_file == NULL) {
-            g_vlogger_file = stderr;
-            vlog_printf(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
-            std::terminate();
-        }
-        BULLSEYE_EXCLUDE_BLOCK_END
-    }
-
-    /*struct doca_log_backend *g_logger_backend = nullptr;
-    const doca_error_t backend_create_status =
-        doca_log_backend_create_with_file_sdk(g_vlogger_file, &g_logger_backend);
-
-    if (backend_create_status != DOCA_SUCCESS) {
-        VPRINT_DOCA_ERR(VLOG_PANIC, backend_create_status, "doca_log_backend_create_with_file_sdk");
-        std::terminate();
-    }
-
-    const doca_error_t backend_set_level_status =
-        doca_log_backend_set_sdk_level(g_logger_backend, log_level);
-    if (backend_set_level_status != DOCA_SUCCESS) {
-        VPRINT_DOCA_ERR(VLOG_PANIC, backend_set_level_status, "doca_log_backend_set_sdk_level");
-        std::terminate();
-    }*/
-
-    g_vlogger_level = log_level;
-    g_p_vlogger_level = &g_vlogger_level;
-    g_vlogger_details = log_details;
-    g_p_vlogger_details = &g_vlogger_details;
-
-    int file_fd = fileno(g_vlogger_file);
-    if (file_fd >= 0 && isatty(file_fd) && log_in_colors) {
-        g_vlogger_log_in_colors = log_in_colors;
-    }
-}
-
-void vlog_stop(void)
-{
-    // Closing logger
-
-    // Allow only really extreme (PANIC) logs to go out
-    g_vlogger_level = VLOG_PANIC;
-
-    // set default module name
-    strcpy(g_vlogger_module_name, VLOG_DEFAULT_MODULE_NAME);
-
-    // Close output stream
-    if (g_vlogger_file && g_vlogger_file != stderr) {
-        FILE *closing_file = g_vlogger_file;
-        g_vlogger_file = nullptr;
-        fclose(closing_file);
-    }
-
-    // fix for using LD_PRELOAD with LBM. Unset the pointer given by the parent process, so a child
-    // could get his own pointer without issues.
-    unsetenv(XLIO_LOG_CB_ENV_VAR);
-}
-
-void vlog_output(vlog_levels_t log_level, const char *fmt, ...)
+// for the extreme case where we have a failure before initializing doca logger
+static void output_before_doca_logger(vlog_levels_t log_level, const char *fmt, ...)
 {
     int len = 0;
     char buf[VLOGGER_STR_SIZE];
@@ -380,54 +308,95 @@ void vlog_output(vlog_levels_t log_level, const char *fmt, ...)
     }
 }
 
-void vlog_print_buffer(vlog_levels_t log_level, const char *msg_header, const char *msg_tail,
-                       const char *buf_user, int buf_len)
+#define PRINT_DOCA_INIT_ERR(level, err, log_fmt, log_args...)                                      \
+    output_before_doca_logger(level, "DOCA error: %s, %s. " log_fmt, doca_error_get_name(err),     \
+                              doca_error_get_descr(err), ##log_args)
+
+void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char *log_filename,
+                int log_details, bool log_in_colors)
 {
-    if (g_vlogger_level < log_level) {
-        return;
-    }
+    g_vlogger_file = stderr;
 
-    int len = 0;
-    char buf[VLOGGER_STR_SIZE];
+    g_vlogger_cb = xlio_log_get_cb_func();
 
-    // Format header
-    if (g_vlogger_level >= VLOG_DEBUG) {
-        // vlog_time(log_level, log_msg);
-        len = snprintf(buf, sizeof(buf) - 1, " Tid: %11lx : %s %s: ", pthread_self(),
-                       g_vlogger_module_name, log_level::to_str(log_level));
-    } else {
-        len = snprintf(buf, sizeof(buf) - 1, "%s %s: ", g_vlogger_module_name,
-                       log_level::to_str(log_level));
-    }
-    if (len < 0) {
-        return;
-    }
-    buf[len + 1] = '\0';
+    strncpy(g_vlogger_module_name, log_module_name, sizeof(g_vlogger_module_name) - 1);
+    g_vlogger_module_name[sizeof(g_vlogger_module_name) - 1] = '\0';
 
-    if (msg_header) {
-        len += snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, "%s", msg_header);
-    }
+    vlog_get_usec_since_start();
 
-    for (int c = 0; c < buf_len && len < (VLOGGER_STR_SIZE - 1 - 6); c++) {
-        len += sprintf(buf + len, "%2.2X ", (unsigned char)buf_user[c]);
-        if ((c % 8) == 7) {
-            len += sprintf(buf + len, " ");
+    char local_log_filename[255];
+    if (log_filename != NULL && strcmp(log_filename, "")) {
+        sprintf(local_log_filename, "%s", log_filename);
+        g_vlogger_fd = open(local_log_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (g_vlogger_fd < 0) {
+            __log_raw(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
+            std::terminate();
         }
+        g_vlogger_file = fdopen(g_vlogger_fd, "w");
+
+        BULLSEYE_EXCLUDE_BLOCK_START
+        if (g_vlogger_file == NULL) {
+            g_vlogger_file = stderr;
+            __log_raw(VLOG_PANIC, "Failed to open logfile: %s\n", local_log_filename);
+            std::terminate();
+        }
+        BULLSEYE_EXCLUDE_BLOCK_END
     }
 
-    if (msg_tail) {
-        len += snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, "%s", msg_tail);
+    struct doca_log_backend *g_logger_backend = nullptr;
+    const doca_error_t backend_create_status =
+        doca_log_backend_create_with_file(g_vlogger_file, &g_logger_backend);
+
+    if (backend_create_status != DOCA_SUCCESS) {
+        PRINT_DOCA_INIT_ERR(VLOG_PANIC, backend_create_status, "doca_log_backend_create_with_file");
+        std::terminate();
     }
 
-    buf[len + 1] = '\0';
-
-    // Print out
-    if (g_vlogger_cb) {
-        g_vlogger_cb(log_level, buf);
-    } else if (g_vlogger_file) {
-        fprintf(g_vlogger_file, "%s", buf);
-        fflush(g_vlogger_file);
-    } else {
-        printf("%s", buf);
+    const doca_error_t backend_set_lower_level_status =
+        doca_log_backend_set_level_lower_limit(g_logger_backend, log_level);
+    if (backend_set_lower_level_status != DOCA_SUCCESS) {
+        PRINT_DOCA_INIT_ERR(VLOG_PANIC, backend_set_lower_level_status,
+                            "doca_log_backend_set_level_lower_limit");
+        std::terminate();
     }
+
+    const doca_error_t backend_set_upper_level_status =
+        doca_log_backend_set_level_upper_limit(g_logger_backend, log_level);
+    if (backend_set_upper_level_status != DOCA_SUCCESS) {
+        PRINT_DOCA_INIT_ERR(VLOG_PANIC, backend_set_upper_level_status,
+                            "doca_log_backend_set_level_upper_limit");
+        std::terminate();
+    }
+
+    g_vlogger_level = log_level;
+    g_p_vlogger_level = &g_vlogger_level;
+    g_vlogger_details = log_details;
+    g_p_vlogger_details = &g_vlogger_details;
+
+    int file_fd = fileno(g_vlogger_file);
+    if (file_fd >= 0 && isatty(file_fd) && log_in_colors) {
+        g_vlogger_log_in_colors = log_in_colors;
+    }
+}
+
+void vlog_stop(void)
+{
+    // Closing logger
+
+    // Allow only really extreme (PANIC) logs to go out
+    g_vlogger_level = VLOG_PANIC;
+
+    // set default module name
+    strcpy(g_vlogger_module_name, VLOG_DEFAULT_MODULE_NAME);
+
+    // Close output stream
+    if (g_vlogger_file && g_vlogger_file != stderr) {
+        FILE *closing_file = g_vlogger_file;
+        g_vlogger_file = nullptr;
+        fclose(closing_file);
+    }
+
+    // fix for using LD_PRELOAD with LBM. Unset the pointer given by the parent process, so a child
+    // could get his own pointer without issues.
+    unsetenv(XLIO_LOG_CB_ENV_VAR);
 }

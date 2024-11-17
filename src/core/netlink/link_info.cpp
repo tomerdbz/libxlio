@@ -34,8 +34,8 @@
 #include "link_info.h"
 #include "vlogger/vlogger.h"
 
+#define MODULE_NAME "netlink_event"
 DOCA_LOG_REGISTER(netlink_event);
-#define MODULE_NAME "netlink_event: "
 
 #define ADDR_MAX_STR_LEN (128)
 

@@ -40,8 +40,8 @@
 #include "mem_buf_desc.h"
 
 #undef MODULE_NAME
+#define MODULE_NAME "ip_frag"
 DOCA_LOG_REGISTER(ip_frag);
-#define MODULE_NAME "ip_frag: "
 
 //#define IP_FRAG_DEBUG 1
 
@@ -102,7 +102,7 @@ int desc_free_list_count = 0;
 ip_frag_manager::ip_frag_manager()
     : lock_spin("ip_frag_manager")
 {
-    frag_dbg(" ");
+    frag_dbg(LOG_FUNCTION_CALL);
     m_frag_counter = 0;
     int i;
 

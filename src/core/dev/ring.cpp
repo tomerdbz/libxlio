@@ -37,8 +37,8 @@
 #include "sock/sockinfo.h"
 
 #undef MODULE_NAME
+#define MODULE_NAME "ring"
 DOCA_LOG_REGISTER(ring);
-#define MODULE_NAME "ring: "
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 

@@ -46,8 +46,8 @@
 #include <sock/sock-app.h>
 
 #undef MODULE_NAME
+#define MODULE_NAME "hw_queue_tx"
 DOCA_LOG_REGISTER(hw_queue_tx);
-#define MODULE_NAME "hw_queue_tx: "
 
 #define hwqtx_logpanic   __log_info_panic
 #define hwqtx_logerr     __log_info_err
@@ -142,7 +142,7 @@ hw_queue_tx::hw_queue_tx(ring_simple *ring, const slave_data_t *slave,
     , m_port_num(slave->port_num)
     , m_doca_mmap(g_buffer_pool_tx->get_doca_mmap())
 {
-    hwqtx_logfunc(" ");
+    hwqtx_logfunc(LOG_FUNCTION_CALL);
 
     memset(&m_hwq_tx_stats, 0, sizeof(m_hwq_tx_stats));
 
@@ -169,7 +169,7 @@ hw_queue_tx::hw_queue_tx(ring_simple *ring, const slave_data_t *slave,
 
 hw_queue_tx::~hw_queue_tx()
 {
-    hwqtx_logfunc(" ");
+    hwqtx_logfunc(LOG_FUNCTION_CALL);
 
     m_doca_txq.reset(nullptr); // Must be destroyed before TX PE.
 
@@ -659,7 +659,7 @@ void hw_queue_tx::send_wqe(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_attr 
 
 void hw_queue_tx::modify_queue_to_ready_state()
 {
-    hwqtx_logdbg(" ");
+    hwqtx_logdbg(LOG_FUNCTION_CALL);
     int ret = 0;
     int qp_state = priv_ibv_query_qp_state(m_mlx5_qp.qp);
     if (qp_state != IBV_QPS_INIT) {
@@ -680,7 +680,7 @@ void hw_queue_tx::modify_queue_to_ready_state()
 
 void hw_queue_tx::modify_queue_to_error_state()
 {
-    hwqtx_logdbg(" ");
+    hwqtx_logdbg(LOG_FUNCTION_CALL);
 
     BULLSEYE_EXCLUDE_BLOCK_START
     if (priv_ibv_modify_qp_to_err(m_mlx5_qp.qp)) {
@@ -691,7 +691,7 @@ void hw_queue_tx::modify_queue_to_error_state()
 
 int hw_queue_tx::prepare_queue(xlio_ibv_qp_init_attr &qp_init_attr)
 {
-    hwqtx_logdbg(" ");
+    hwqtx_logdbg(LOG_FUNCTION_CALL);
     int ret = 0;
 
     qp_init_attr.qp_type = IBV_QPT_RAW_PACKET;

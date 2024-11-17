@@ -39,13 +39,12 @@
 #endif
 
 #include <doca_log.h>
-#include <iostream>
-#include <fstream>
 #include <time.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <exception>
 #include "utils/bullseye.h"
 #include "utils/rdtsc.h"
 
@@ -68,18 +67,13 @@
 #undef __INFO__
 #define __INFO__ this
 
-#define vlog_printf(_log_level, _format, ...)                                                      \
-    do {                                                                                           \
-        if (g_vlogger_level >= (_log_level)) {                                                     \
-            vlog_output((_log_level), _format, ##__VA_ARGS__);                                     \
-        }                                                                                          \
-    } while (0)
+int get_header_source();
 
 #define VLOG_PRINTF(log_level, log_fmt, log_args...)                                               \
-    vlog_printf(log_level, MODULE_HDR log_fmt "\n", __LINE__, __FUNCTION__, ##log_args)
+    __log_raw(log_level, MODULE_HDR log_fmt "\n", __LINE__, __FUNCTION__, ##log_args)
 #define VLOG_PRINTF_INFO(log_level, log_fmt, log_args...)                                          \
-    vlog_printf(log_level, MODULE_HDR_INFO log_fmt "\n", __INFO__, __LINE__, __FUNCTION__,         \
-                ##log_args)
+    __log_raw(log_level, MODULE_HDR_INFO log_fmt "\n", __INFO__, __LINE__, __FUNCTION__, ##log_args)
+
 #define VLOG_PRINTF_INFO_ONCE_THEN_ALWAYS(log_level_once, log_level, log_fmt, log_args...)         \
     do {                                                                                           \
         static vlog_levels_t ___log_level = log_level_once;                                        \
@@ -97,14 +91,14 @@
 #define VLOG_PRINTF_ONCE_THEN_DEBUG(log_level_once, log_fmt, log_args...)                          \
     do {                                                                                           \
         static vlog_levels_t ___log_level = log_level_once;                                        \
-        vlog_printf(___log_level, log_fmt, ##log_args);                                            \
+        __log_raw(___log_level, log_fmt, ##log_args);                                              \
         ___log_level = VLOG_DEBUG;                                                                 \
     } while (0)
 
 #define VLOG_PRINTF_ENTRY(log_level, log_fmt, log_args...)                                         \
-    vlog_printf(log_level, MODULE_HDR_ENTRY "%s(" log_fmt ")\n", __FUNCTION__, ##log_args)
+    __log_raw(log_level, MODULE_HDR_ENTRY "%s(" log_fmt ")\n", __FUNCTION__, ##log_args)
 #define VLOG_PRINTF_EXIT(log_level, log_fmt, log_args...)                                          \
-    vlog_printf(log_level, MODULE_HDR_EXIT "%s() " log_fmt "\n", __FUNCTION__, ##log_args)
+    __log_raw(log_level, MODULE_HDR_EXIT "%s() " log_fmt "\n", __FUNCTION__, ##log_args)
 
 #define __log_panic(log_fmt, log_args...)                                                          \
     do {                                                                                           \
@@ -122,6 +116,27 @@
 #define __log_info(log_fmt, log_args...)                                                           \
     do {                                                                                           \
         DOCA_LOG_INFO(log_fmt, ##log_args);                                                        \
+    } while (0)
+
+#define __log_debug(log_fmt, log_args...)                                                          \
+    do {                                                                                           \
+        DOCA_LOG_DBG(log_fmt, ##log_args);                                                         \
+    } while (0)
+
+#define __log_raw(log_level, log_fmt, log_args...)                                                 \
+    do {                                                                                           \
+        DOCA_LOG(log_level, log_fmt, ##log_args);                                                  \
+    } while (0)
+
+#define __log_print(log_level, log_fmt, log_args...)                                               \
+    do {                                                                                           \
+        DOCA_LOG(log_level, log_fmt, ##log_args);                                                  \
+    } while (0)
+
+#define __log_raw_header(log_level, log_fmt, log_args...)                                          \
+    do {                                                                                           \
+        doca_log(log_level, get_header_source(), __FILE__, __LINE__, __func__, log_fmt,            \
+                 ##log_args);                                                                      \
     } while (0)
 
 #if (MAX_DEFINED_LOG_LEVEL < DEFINED_VLOG_DETAILS)
@@ -166,20 +181,20 @@
 
 #define __log_info_panic(log_fmt, log_args...)                                                     \
     do {                                                                                           \
-        DOCA_LOG_INFO("PANIC" log_fmt, ##log_args);                                                \
+        DOCA_LOG_INFO("PANIC " log_fmt, ##log_args);                                               \
         std::terminate();                                                                          \
     } while (0)
 #define __log_info_err(log_fmt, log_args...)                                                       \
     do {                                                                                           \
-        DOCA_LOG_INFO("ERROR" log_fmt, ##log_args);                                                \
+        DOCA_LOG_INFO("ERROR " log_fmt, ##log_args);                                               \
     } while (0)
 #define __log_info_warn(log_fmt, log_args...)                                                      \
     do {                                                                                           \
-        DOCA_LOG_INFO("WARNING" log_fmt, ##log_args);                                              \
+        DOCA_LOG_INFO("WARNING " log_fmt, ##log_args);                                             \
     } while (0)
 #define __log_info_info(log_fmt, log_args...)                                                      \
     do {                                                                                           \
-        DOCA_LOG_INFO("INFO" log_fmt, ##log_args);                                                 \
+        DOCA_LOG_INFO("INFO " log_fmt, ##log_args);                                                \
     } while (0)
 
 #if (MAX_DEFINED_LOG_LEVEL < DEFINED_VLOG_DETAILS)
@@ -188,7 +203,7 @@
 #define __log_info_details(log_fmt, log_args...)                                                   \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DETAILS)                                                       \
-            DOCA_LOG_INFO("DETAILS" log_fmt, ##log_args);                                          \
+            DOCA_LOG_INFO("DETAILS " log_fmt, ##log_args);                                         \
     } while (0)
 #endif
 
@@ -198,7 +213,7 @@
 #define __log_info_dbg(log_fmt, log_args...)                                                       \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DEBUG)                                                         \
-            DOCA_LOG_INFO("DEBUG" log_fmt, ##log_args);                                            \
+            DOCA_LOG_INFO("DEBUG " log_fmt, ##log_args);                                           \
     } while (0)
 #endif
 
@@ -208,7 +223,7 @@
 #define __log_info_fine(log_fmt, log_args...)                                                      \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINE)                                                          \
-            DOCA_LOG_INFO("FINE" log_fmt, ##log_args);                                             \
+            DOCA_LOG_INFO("FINE " log_fmt, ##log_args);                                            \
     } while (0)
 #endif
 
@@ -218,7 +233,7 @@
 #define __log_info_finer(log_fmt, log_args...)                                                     \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINER)                                                         \
-            DOCA_LOG_INFO("FINER" log_fmt, ##log_args);                                            \
+            DOCA_LOG_INFO("FINER " log_fmt, ##log_args);                                           \
     } while (0)
 #endif /* MAX_DEFINED_LOG_LEVEL */
 
@@ -285,9 +300,12 @@
 #define PRINT_DOCA_ERR(logger, err, log_fmt, log_args...)                                          \
     logger("DOCA error: %s, %s. " log_fmt, doca_error_get_name(err), doca_error_get_descr(err),    \
            ##log_args)
+
 #define VPRINT_DOCA_ERR(level, err, log_fmt, log_args...)                                          \
-    vlog_printf(level, "DOCA error: %s, %s. " log_fmt, doca_error_get_name(err),                   \
-                doca_error_get_descr(err), ##log_args)
+    __log_raw(level, "DOCA error: %s, %s. " log_fmt, doca_error_get_name(err),                     \
+              doca_error_get_descr(err), ##log_args)
+
+#define LOG_FUNCTION_CALL " "
 
 // deprecated functions - only exist for Backward Compatibility.  Please avoid using them!
 #define __log_func(...)          __log_fine(__VA_ARGS__)
@@ -350,11 +368,11 @@ extern uint32_t g_vlogger_usec_on_startup;
 extern bool g_vlogger_log_in_colors;
 extern xlio_log_cb_t g_vlogger_cb;
 
-#define vlog_func_enter() vlog_printf(VLOG_FINE, "ENTER %s\n", __PRETTY_FUNCTION__);
-#define vlog_func_exit()  vlog_printf(VLOG_FINE, "EXIT %s\n", __PRETTY_FUNCTION__);
+#define vlog_func_enter() __log_raw(VLOG_FINE, "ENTER %s\n", __PRETTY_FUNCTION__);
+#define vlog_func_exit()  __log_raw(VLOG_FINE, "EXIT %s\n", __PRETTY_FUNCTION__);
 
-#define vlog_func_all_enter() vlog_printf(VLOG_FINER, "ENTER %s\n", __PRETTY_FUNCTION__);
-#define vlog_func_all_exit()  vlog_printf(VLOG_FINER, "EXIT %s\n", __PRETTY_FUNCTION__);
+#define vlog_func_all_enter() __log_raw(VLOG_FINER, "ENTER %s\n", __PRETTY_FUNCTION__);
+#define vlog_func_all_exit()  __log_raw(VLOG_FINER, "EXIT %s\n", __PRETTY_FUNCTION__);
 
 #ifndef HAVE_GETTID
 pid_t gettid(void); // Check vlogger.cpp for implementation
@@ -387,8 +405,6 @@ static inline uint32_t vlog_get_usec_since_start()
 #define VLOGGER_STR_SIZE 512
 
 void vlog_output(vlog_levels_t log_level, const char *fmt, ...);
-void vlog_print_buffer(vlog_levels_t log_level, const char *msg_header, const char *msg_tail,
-                       const char *buf_user, int buf_len);
 
 #ifdef __cplusplus
 };
