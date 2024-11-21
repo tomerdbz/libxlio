@@ -760,7 +760,6 @@ void mce_sys_var::get_env_params()
 
     print_report = MCE_DEFAULT_PRINT_REPORT;
     log_level = VLOG_DEFAULT;
-    log_details = MCE_DEFAULT_LOG_DETAILS;
     log_colors = MCE_DEFAULT_LOG_COLORS;
     handle_sigintr = MCE_DEFAULT_HANDLE_SIGINTR;
     handle_segfault = MCE_DEFAULT_HANDLE_SIGFAULT;
@@ -1100,14 +1099,6 @@ void mce_sys_var::get_env_params()
 
     if ((env_ptr = getenv(SYS_VAR_LOG_LEVEL))) {
         log_level = log_level::from_str(env_ptr, VLOG_DEFAULT);
-    }
-
-    if (log_level >= VLOG_DEBUG) {
-        log_details = 2;
-    }
-
-    if ((env_ptr = getenv(SYS_VAR_LOG_DETAILS))) {
-        log_details = (uint32_t)atoi(env_ptr);
     }
 
     if ((env_ptr = getenv(SYS_VAR_LOG_COLORS))) {

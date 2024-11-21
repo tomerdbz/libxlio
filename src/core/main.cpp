@@ -485,8 +485,6 @@ void print_xlio_global_settings()
     VLOG_STR_PARAM_STRING("Log Level", log_level::to_str(safe_mce_sys().log_level), "",
                           SYS_VAR_LOG_LEVEL, log_level::to_str(safe_mce_sys().log_level));
 
-    VLOG_PARAM_NUMBER("Log Details", safe_mce_sys().log_details, MCE_DEFAULT_LOG_DETAILS,
-                      SYS_VAR_LOG_DETAILS);
     VLOG_PARAM_STRING("Log Colors", safe_mce_sys().log_colors, MCE_DEFAULT_LOG_COLORS,
                       SYS_VAR_LOG_COLORS, safe_mce_sys().log_colors ? "Enabled " : "Disabled");
     VLOG_STR_PARAM_STRING("Log File", safe_mce_sys().log_filename, MCE_DEFAULT_LOG_FILE,
@@ -1100,9 +1098,8 @@ static void do_global_ctors_helper()
     // Create all global management objects
     NEW_CTOR(g_p_event_handler_manager, event_handler_manager());
 
-    xlio_shmem_stats_open(&g_p_vlogger_level, &g_p_vlogger_details);
+    xlio_shmem_stats_open(&g_p_vlogger_level);
     *g_p_vlogger_level = g_vlogger_level;
-    *g_p_vlogger_details = g_vlogger_details;
 
     sock_stats::init_instance(safe_mce_sys().stats_fd_num_max);
 
@@ -1364,7 +1361,7 @@ extern "C" int xlio_init(void)
     g_init_global_ctors_done = false;
 
     vlog_start(PRODUCT_NAME, safe_mce_sys().log_level, safe_mce_sys().log_filename,
-               safe_mce_sys().log_details, safe_mce_sys().log_colors);
+               safe_mce_sys().log_colors);
 
     print_xlio_global_settings();
 

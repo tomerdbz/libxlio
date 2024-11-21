@@ -59,11 +59,9 @@ int g_vlogger_fd = -1;
 FILE *g_vlogger_file = NULL;
 vlog_levels_t g_vlogger_level = VLOG_DEFAULT;
 vlog_levels_t *g_p_vlogger_level = NULL;
-uint8_t g_vlogger_details = 0;
-uint8_t *g_p_vlogger_details = NULL;
-uint32_t g_vlogger_usec_on_startup = 0;
+
+// TODO - integrate with doca logger once they implement coloring
 bool g_vlogger_log_in_colors = MCE_DEFAULT_LOG_COLORS;
-xlio_log_cb_t g_vlogger_cb = NULL;
 
 DOCA_LOG_REGISTER(logger);
 
@@ -183,24 +181,6 @@ pid_t gettid(void)
 #pragma BullseyeCoverage off
 #endif
 
-static inline uint32_t vlog_get_usec_since_start()
-{
-    struct timespec ts_now;
-
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (gettime(&ts_now)) {
-        printf("%s() gettime() Returned with Error (errno=%d %m)\n", __func__, errno);
-        return (uint32_t)-1;
-    }
-    BULLSEYE_EXCLUDE_BLOCK_END
-
-    if (!g_vlogger_usec_on_startup) {
-        g_vlogger_usec_on_startup = ts_to_usec(&ts_now);
-    }
-
-    return (ts_to_usec(&ts_now) - g_vlogger_usec_on_startup);
-}
-
 void printf_backtrace(void)
 {
     char **backtrace_strings;
@@ -261,22 +241,8 @@ void printf_backtrace(void)
 #pragma BullseyeCoverage on
 #endif
 
-////////////////////////////////////////////////////////////////////////////////
-// NOTE: this function matches 'bool xlio_log_set_cb_func(xlio_log_cb_t log_cb)' that
-// we gave customers; hence, you must not change our side without considering their side
-static xlio_log_cb_t xlio_log_get_cb_func()
-{
-    xlio_log_cb_t log_cb = NULL;
-    const char *const CB_STR = getenv(XLIO_LOG_CB_ENV_VAR);
-    if (!CB_STR || !*CB_STR) {
-        return NULL;
-    }
-
-    if (1 != sscanf(CB_STR, "%p", &log_cb)) {
-        return NULL;
-    }
-    return log_cb;
-}
+// room for color code termination and EOL
+#define VLOGGER_STR_TERMINATION_SIZE 6
 
 // for the extreme case where we have a failure before initializing doca logger
 static void output_before_doca_logger(vlog_levels_t log_level, const char *fmt, ...)
@@ -292,21 +258,8 @@ static void output_before_doca_logger(vlog_levels_t log_level, const char *fmt, 
             snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, "%s", log_level::get_color(log_level));
     }
 
-    switch (g_vlogger_details) {
-    case 3: // Time
-        len += snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, " Time: %9.3f",
-                        ((float)vlog_get_usec_since_start()) / 1000); // fallthrough
-    case 2: // Pid
-        len +=
-            snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, " Pid: %5u", getpid()); // fallthrough
-    case 1: // Tid
-        len +=
-            snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, " Tid: %5u", gettid()); // fallthrough
-    case 0: // Func
-    default:
-        len += snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, " %s %s: ", g_vlogger_module_name,
-                        log_level::to_str(log_level));
-    }
+    len += snprintf(buf + len, VLOGGER_STR_SIZE - len - 1, " %s %s: ", g_vlogger_module_name,
+                    log_level::to_str(log_level));
 
     if (len < 0) {
         return;
@@ -328,21 +281,13 @@ static void output_before_doca_logger(vlog_levels_t log_level, const char *fmt, 
             len = VLOGGER_STR_SIZE - VLOGGER_STR_TERMINATION_SIZE - 1;
         }
 
-        len = snprintf(buf + len, VLOGGER_STR_TERMINATION_SIZE, VLOGGER_STR_COLOR_TERMINATION_STR);
+        len = snprintf(buf + len, VLOGGER_STR_TERMINATION_SIZE, COLOR_DEFAULT);
         if (len < 0) {
             return;
         }
     }
 
-    if (g_vlogger_cb) {
-        g_vlogger_cb(log_level, buf);
-    } else if (g_vlogger_file) {
-        // Print out
-        fprintf(g_vlogger_file, "%s", buf);
-        fflush(g_vlogger_file);
-    } else {
-        fprintf(stderr, "%s", buf);
-    }
+    fprintf(stderr, "%s", buf);
 }
 
 #define PRINT_INIT_ERR(level, err, log_fmt, log_args...)                                           \
@@ -350,16 +295,12 @@ static void output_before_doca_logger(vlog_levels_t log_level, const char *fmt, 
                               doca_error_get_name(err), doca_error_get_descr(err), ##log_args)
 
 void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char *log_filename,
-                int log_details, bool log_in_colors)
+                bool log_in_colors)
 {
     g_vlogger_file = stderr;
 
-    g_vlogger_cb = xlio_log_get_cb_func();
-
     strncpy(g_vlogger_module_name, log_module_name, sizeof(g_vlogger_module_name) - 1);
     g_vlogger_module_name[sizeof(g_vlogger_module_name) - 1] = '\0';
-
-    vlog_get_usec_since_start();
 
     char local_log_filename[255];
     if (log_filename != NULL && strcmp(log_filename, "")) {
@@ -407,8 +348,6 @@ void vlog_start(const char *log_module_name, vlog_levels_t log_level, const char
 
     g_vlogger_level = log_level;
     g_p_vlogger_level = &g_vlogger_level;
-    g_vlogger_details = log_details;
-    g_p_vlogger_details = &g_vlogger_details;
 
     int file_fd = fileno(g_vlogger_file);
     if (file_fd >= 0 && isatty(file_fd) && log_in_colors) {

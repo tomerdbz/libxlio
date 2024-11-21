@@ -164,7 +164,7 @@ void write_version_details_to_shmem(version_info_t *p_ver_info)
     p_ver_info->xlio_lib_rel = PRJ_LIBRARY_RELEASE;
 }
 
-void xlio_shmem_stats_open(vlog_levels_t **p_p_xlio_log_level, uint8_t **p_p_xlio_log_details)
+void xlio_shmem_stats_open(vlog_levels_t **p_p_xlio_log_level)
 {
     void *buf = NULL;
     void *p_shmem = NULL;
@@ -275,7 +275,6 @@ success:
 
     // Update the shmem initial log values
     g_sh_mem->log_level = **p_p_xlio_log_level;
-    g_sh_mem->log_details_level = **p_p_xlio_log_details;
 
     // Update the shmem with initial fd dump values
     g_sh_mem->dump = DUMP_DISABLED;
@@ -284,7 +283,6 @@ success:
 
     // ReMap internal log level to ShMem area
     *p_p_xlio_log_level = &g_sh_mem->log_level;
-    *p_p_xlio_log_details = &g_sh_mem->log_details_level;
 
     g_p_stats_data_reader->register_to_timer();
 
@@ -298,7 +296,6 @@ shmem_error:
     g_sh_mem = &g_local_sh_mem;
     g_sh_mem->reset();
     *p_p_xlio_log_level = &g_sh_mem->log_level;
-    *p_p_xlio_log_details = &g_sh_mem->log_details_level;
     BULLSEYE_EXCLUDE_BLOCK_END
 }
 
@@ -332,7 +329,6 @@ void xlio_shmem_stats_close()
     }
     g_sh_mem = NULL;
     g_p_vlogger_level = NULL;
-    g_p_vlogger_details = NULL;
     delete g_p_stats_data_reader;
     g_p_stats_data_reader = NULL;
 }

@@ -2298,7 +2298,7 @@ EXPORT_SYMBOL pid_t XLIO_SYMBOL(fork)(void)
 
         safe_mce_sys().get_env_params();
         vlog_start(PRODUCT_NAME, safe_mce_sys().log_level, safe_mce_sys().log_filename,
-                   safe_mce_sys().log_details, safe_mce_sys().log_colors);
+                   safe_mce_sys().log_colors);
         if (xlio_rdma_lib_reset()) {
             srdr_logerr("Child Process: rdma_lib_reset failed %d %s", errno, strerror(errno));
         }
@@ -2379,7 +2379,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(daemon)(int __nochdir, int __noclose)
 
         safe_mce_sys().get_env_params();
         vlog_start(PRODUCT_NAME, safe_mce_sys().log_level, safe_mce_sys().log_filename,
-                   safe_mce_sys().log_details, safe_mce_sys().log_colors);
+                   safe_mce_sys().log_colors);
         if (xlio_rdma_lib_reset()) {
             srdr_logerr("Child Process: rdma_lib_reset failed %d %s", errno, strerror(errno));
         }

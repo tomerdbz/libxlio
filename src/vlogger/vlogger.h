@@ -350,11 +350,7 @@ const char *to_str(vlog_levels_t level);
 const char *get_color(vlog_levels_t level);
 } // namespace log_level
 
-#define VLOG_SINCE_YEAR     1900
 #define VLOG_MODULE_MAX_LEN 10
-
-#define VLOGGER_STR_COLOR_TERMINATION_STR "\e[0m"
-#define VLOGGER_STR_TERMINATION_SIZE      6
 
 typedef void (*xlio_log_cb_t)(int log_level, const char *str);
 
@@ -363,11 +359,6 @@ extern FILE *g_vlogger_file;
 extern int g_vlogger_fd;
 extern vlog_levels_t g_vlogger_level;
 extern vlog_levels_t *g_p_vlogger_level;
-extern uint8_t g_vlogger_details;
-extern uint8_t *g_p_vlogger_details;
-extern uint32_t g_vlogger_usec_on_startup;
-extern bool g_vlogger_log_in_colors;
-extern xlio_log_cb_t g_vlogger_cb;
 
 #define vlog_func_enter() __log_raw(VLOG_FINE, "ENTER %s\n", __PRETTY_FUNCTION__);
 #define vlog_func_exit()  __log_raw(VLOG_FINE, "EXIT %s\n", __PRETTY_FUNCTION__);
@@ -382,7 +373,7 @@ pid_t gettid(void); // Check vlogger.cpp for implementation
 void printf_backtrace(void);
 
 void vlog_start(const char *log_module_name, vlog_levels_t log_level = VLOG_DEFAULT,
-                const char *log_filename = NULL, int log_details = 0, bool colored_log = true);
+                const char *log_filename = NULL, bool colored_log = true);
 void vlog_stop(void);
 
 #define VLOGGER_STR_SIZE 512
