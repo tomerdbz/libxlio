@@ -418,16 +418,21 @@ static inline void create_mgid_from_ipv4_mc_ip(uint8_t *mgid, uint16_t pkey, uin
     mgid[14] = (uint8_t)((ip >> 16) & 0xff);
     mgid[15] = (uint8_t)((ip >> 24) & 0xff);
 
-    vlog_printf(
-        VLOG_DEBUG,
-        "Translated to mgid: "
-        "%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X\n",
-        ((unsigned char *)(mgid))[0], ((unsigned char *)(mgid))[1], ((unsigned char *)(mgid))[2],
-        ((unsigned char *)(mgid))[3], ((unsigned char *)(mgid))[4], ((unsigned char *)(mgid))[5],
-        ((unsigned char *)(mgid))[6], ((unsigned char *)(mgid))[7], ((unsigned char *)(mgid))[8],
-        ((unsigned char *)(mgid))[9], ((unsigned char *)(mgid))[10], ((unsigned char *)(mgid))[11],
-        ((unsigned char *)(mgid))[12], ((unsigned char *)(mgid))[13], ((unsigned char *)(mgid))[14],
-        ((unsigned char *)(mgid))[15]);
+    /* TODO
+        __log_dbg(
+            "Translated to mgid: "
+            "%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X:%02X%02X\n",
+            ((unsigned char *)(mgid))[0], ((unsigned char *)(mgid))[1], ((unsigned char
+       *)(mgid))[2],
+            ((unsigned char *)(mgid))[3], ((unsigned char *)(mgid))[4], ((unsigned char
+       *)(mgid))[5],
+            ((unsigned char *)(mgid))[6], ((unsigned char *)(mgid))[7], ((unsigned char
+       *)(mgid))[8],
+            ((unsigned char *)(mgid))[9], ((unsigned char *)(mgid))[10], ((unsigned char
+       *)(mgid))[11],
+            ((unsigned char *)(mgid))[12], ((unsigned char *)(mgid))[13], ((unsigned char
+       *)(mgid))[14],
+            ((unsigned char *)(mgid))[15]);*/
 }
 
 /**
@@ -459,8 +464,8 @@ public:
         // update timer
         gettime(&m_current);
         ts_sub(&m_current, &m_start, &m_elapsed);
-        vlog_printf(VLOG_FUNC_ALL, "update loops_timer (elapsed time=%ld sec %ld usec\n",
-                    ts_to_sec(&m_elapsed), ts_to_usec(&m_elapsed));
+        /*__log_raw(VLOG_FUNC_ALL, "update loops_timer (elapsed time=%ld sec %ld usec\n",
+                  ts_to_sec(&m_elapsed), ts_to_usec(&m_elapsed));*/
 
         // test for timeout
         if (m_timeout_msec <= ts_to_msec(&m_elapsed)) {

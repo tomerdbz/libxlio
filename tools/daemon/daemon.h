@@ -54,6 +54,7 @@
 #include <net/if.h>
 #include <sys/time.h>
 #include <ifaddrs.h>
+#include <doca_log.h>
 
 #ifdef HAVE_LINUX_LIMITS_H
 #include <linux/limits.h>
@@ -67,7 +68,7 @@
 #include "core/util/list.h"
 #include "utils/clock.h"
 
-#define MODULE_NAME "xliod"
+#define MODULE_NAME "xliod: "
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -91,6 +92,35 @@
 #define PATH_MAX 4096 /**< chars in a path name including null */
 #endif
 
+#define log_fatal(fmt, ...)                                                                        \
+    do {                                                                                           \
+    } while (0)
+
+#define log_error(fmt, ...)                                                                        \
+    do {                                                                                           \
+    } while (0)
+
+#define log_warn(fmt, ...)                                                                         \
+    do {                                                                                           \
+    } while (0)
+
+#define log_info(fmt, ...)                                                                         \
+    do {                                                                                           \
+    } while (0)
+
+#define log_debug(fmt, ...)                                                                        \
+    do {                                                                                           \
+    } while (0)
+
+#define log_trace(fmt, ...)                                                                        \
+    do {                                                                                           \
+    } while (0)
+
+#define log_hexdump(_ptr, _size)                                                                   \
+    do {                                                                                           \
+    } while (0)
+
+/*
 #define log_fatal(fmt, ...)                                                                        \
     do {                                                                                           \
         if (daemon_cfg.opt.log_level > 0)                                                          \
@@ -126,7 +156,7 @@
         if (daemon_cfg.opt.log_level > 5)                                                          \
             sys_log(LOG_INFO, "[TRACE ] " fmt, ##__VA_ARGS__);                                     \
     } while (0)
-
+*/
 /**
  * @struct module_cfg
  * @brief Configuration parameters in global values

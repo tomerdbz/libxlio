@@ -340,7 +340,6 @@ public:
 
     bool print_report;
     vlog_levels_t log_level;
-    uint32_t log_details;
     char log_filename[PATH_MAX];
     char stats_filename[PATH_MAX];
     char stats_shmem_dirname[PATH_MAX];
@@ -546,7 +545,6 @@ extern mce_sys_var &safe_mce_sys();
  */
 #define SYS_VAR_PRINT_REPORT        "XLIO_PRINT_REPORT"
 #define SYS_VAR_LOG_LEVEL           "XLIO_TRACELEVEL"
-#define SYS_VAR_LOG_DETAILS         "XLIO_LOG_DETAILS"
 #define SYS_VAR_LOG_FILENAME        "XLIO_LOG_FILE"
 #define SYS_VAR_STATS_FILENAME      "XLIO_STATS_FILE"
 #define SYS_VAR_STATS_SHMEM_DIRNAME "XLIO_STATS_SHMEM_DIR"
@@ -704,7 +702,6 @@ extern mce_sys_var &safe_mce_sys();
 #define MCE_DEFAULT_STATS_SHMEM_DIR          (XLIO_AGENT_PATH)
 #define MCE_DEFAULT_SERVICE_FOLDER           (XLIO_AGENT_PATH)
 #define MCE_DEFAULT_SERVICE_ENABLE           (false)
-#define MCE_DEFAULT_LOG_DETAILS              (0)
 #define MCE_DEFAULT_LOG_COLORS               (true)
 #define MCE_DEFAULT_APP_ID                   ("XLIO_DEFAULT_APPLICATION_ID")
 #define MCE_DEFAULT_HANDLE_SIGINTR           (true)

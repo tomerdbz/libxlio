@@ -32,6 +32,8 @@
  */
 
 #include <inttypes.h>
+#include <sstream>
+#include <iomanip>
 #include <netinet/ip6.h>
 #include "ring_slave.h"
 #include "proto/ip_frag.h"
@@ -39,9 +41,11 @@
 #include "dev/rfs_uc_tcp_gro.h"
 #include "sock/fd_collection.h"
 #include "sock/sockinfo.h"
+#include "vlogger/vlogger.h"
 
 #undef MODULE_NAME
 #define MODULE_NAME "ring_slave"
+DOCA_LOG_REGISTER(ring_slave);
 #undef MODULE_HDR
 #define MODULE_HDR MODULE_NAME "%d:%s() "
 
@@ -913,9 +917,14 @@ bool steering_handler<KEY4T, KEY2T, HDR>::rx_process_buffer_no_flow_id(
             sz_data, ip_tot_len);
         ring_loginfo("Rx packet info (buf->%p, bufsize=%zu), id=%s", p_rx_wc_buf_desc->p_buffer,
                      p_rx_wc_buf_desc->sz_data, hdr_get_id(p_ip_h).c_str());
-        vlog_print_buffer(VLOG_INFO, "rx packet data: ", "\n",
-                          (const char *)p_rx_wc_buf_desc->p_buffer,
-                          std::min(112, (int)p_rx_wc_buf_desc->sz_data));
+
+        std::ostringstream oss;
+        for (uint8_t i = 0; i < std::min(112, (int)p_rx_wc_buf_desc->sz_data); ++i) {
+            oss << std::hex << std::setw(2) << std::setfill('0')
+                << (unsigned)p_rx_wc_buf_desc->p_buffer[i];
+        }
+
+        __log_raw(VLOG_INFO, "rx packet data: \n%s", oss.str().c_str());
         return false;
     }
 

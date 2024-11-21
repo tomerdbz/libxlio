@@ -139,10 +139,10 @@ public:
                 tcp_mem.min_value = 4096;
                 tcp_mem.default_value = 16384;
                 tcp_mem.max_value = 4194304;
-                vlog_printf(VLOG_WARNING,
-                            "sysctl_reader failed to read net.ipv4.tcp_wmem values - Using "
-                            "defaults : %d %d %d\n",
-                            tcp_mem.min_value, tcp_mem.default_value, tcp_mem.max_value);
+                __log_raw_header(VLOG_WARNING,
+                                 "sysctl_reader failed to read net.ipv4.tcp_wmem values - Using "
+                                 "defaults : %d %d %d\n",
+                                 tcp_mem.min_value, tcp_mem.default_value, tcp_mem.max_value);
             }
         }
         return &tcp_mem;
@@ -158,10 +158,10 @@ public:
                 tcp_mem.min_value = 4096;
                 tcp_mem.default_value = 87380;
                 tcp_mem.max_value = 4194304;
-                vlog_printf(VLOG_WARNING,
-                            "sysctl_reader failed to read net.ipv4.tcp_rmem values - Using "
-                            "defaults : %d %d %d\n",
-                            tcp_mem.min_value, tcp_mem.default_value, tcp_mem.max_value);
+                __log_raw_header(VLOG_WARNING,
+                                 "sysctl_reader failed to read net.ipv4.tcp_rmem values - Using "
+                                 "defaults : %d %d %d\n",
+                                 tcp_mem.min_value, tcp_mem.default_value, tcp_mem.max_value);
             }
         }
         return &tcp_mem;
@@ -245,7 +245,7 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv4/igmp_max_memberships", 1024);
             if (0 > val) {
-                vlog_printf(VLOG_WARNING, "failed to read get_igmp_max_membership value\n");
+                __log_raw_header(VLOG_WARNING, "failed to read get_igmp_max_membership value\n");
             }
         }
         return val;
@@ -257,7 +257,8 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv4/igmp_max_msf", 1024);
             if (0 > val) {
-                vlog_printf(VLOG_WARNING, "failed to read get_igmp_max_source_membership value\n");
+                __log_raw_header(VLOG_WARNING,
+                                 "failed to read get_igmp_max_source_membership value\n");
             }
         }
         return val;
@@ -269,7 +270,8 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv6/mld_max_msf", 64);
             if (0 > val) {
-                vlog_printf(VLOG_WARNING, "failed to read get_mld_max_source_membership value\n");
+                __log_raw_header(VLOG_WARNING,
+                                 "failed to read get_mld_max_source_membership value\n");
             }
         }
         return val;
@@ -281,7 +283,7 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv6/bindv6only", 0);
             if (0 > val) {
-                vlog_printf(VLOG_WARNING, "failed to read bindv6only value\n");
+                __log_raw_header(VLOG_WARNING, "failed to read bindv6only value\n");
             }
         }
         return val;
@@ -293,7 +295,7 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv6/conf/all/optimistic_dad", 0, VLOG_DEBUG);
             if (0 > val) {
-                vlog_printf(VLOG_DEBUG, "failed to read ipv6/conf/all/optimistic_dad value\n");
+                __log_raw_header(VLOG_DEBUG, "failed to read ipv6/conf/all/optimistic_dad value\n");
             }
         }
         return val;
@@ -305,7 +307,7 @@ public:
         if (update) {
             val = read_file_to_int("/proc/sys/net/ipv6/conf/all/use_optimistic", 0, VLOG_DEBUG);
             if (0 > val) {
-                vlog_printf(VLOG_DEBUG, "failed to read ipv6/conf/all/use_optimistic value\n");
+                __log_raw_header(VLOG_DEBUG, "failed to read ipv6/conf/all/use_optimistic value\n");
             }
         }
         return val;
@@ -314,7 +316,7 @@ public:
     int get_ipv6_if_optimistic_dad(const char *if_name)
     {
         if (!if_name) {
-            vlog_printf(VLOG_DEBUG, "get_ipv6_if_optimistic_dad if_name is null\n");
+            __log_raw_header(VLOG_DEBUG, "get_ipv6_if_optimistic_dad if_name is null\n");
             return 0;
         }
 
@@ -323,7 +325,8 @@ public:
         conf_name += "/optimistic_dad";
         int val = read_file_to_int(conf_name.c_str(), 0, VLOG_DEBUG);
         if (0 > val) {
-            vlog_printf(VLOG_DEBUG, "failed to read ipv6/conf/%s/optimistic_dad value\n", if_name);
+            __log_raw_header(VLOG_DEBUG, "failed to read ipv6/conf/%s/optimistic_dad value\n",
+                             if_name);
         }
         return val;
     }
@@ -331,7 +334,7 @@ public:
     int get_ipv6_if_use_optimistic(const char *if_name)
     {
         if (!if_name) {
-            vlog_printf(VLOG_DEBUG, "get_ipv6_if_use_optimistic if_name is null\n");
+            __log_raw_header(VLOG_DEBUG, "get_ipv6_if_use_optimistic if_name is null\n");
             return 0;
         }
 
@@ -340,7 +343,8 @@ public:
         conf_name += "/use_optimistic";
         int val = read_file_to_int(conf_name.c_str(), 0, VLOG_DEBUG);
         if (0 > val) {
-            vlog_printf(VLOG_DEBUG, "failed to read ipv6/conf/%s/use_optimistic value\n", if_name);
+            __log_raw_header(VLOG_DEBUG, "failed to read ipv6/conf/%s/use_optimistic value\n",
+                             if_name);
         }
         return val;
     }
@@ -348,7 +352,7 @@ public:
     int get_ipv6_if_use_tempaddr(const char *if_name)
     {
         if (!if_name) {
-            vlog_printf(VLOG_DEBUG, "get_ipv6_if_use_tempaddr if_name is null\n");
+            __log_raw_header(VLOG_DEBUG, "get_ipv6_if_use_tempaddr if_name is null\n");
             return 0;
         }
 
@@ -357,7 +361,8 @@ public:
         conf_name += "/use_tempaddr";
         int val = read_file_to_int(conf_name.c_str(), 0, VLOG_DEBUG);
         if (0 > val) {
-            vlog_printf(VLOG_DEBUG, "failed to read ipv6/conf/%s/use_tempaddr value\n", if_name);
+            __log_raw_header(VLOG_DEBUG, "failed to read ipv6/conf/%s/use_tempaddr value\n",
+                             if_name);
         }
         return val;
     }

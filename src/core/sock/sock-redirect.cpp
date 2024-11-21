@@ -36,6 +36,7 @@
 #include "sock-redirect.h"
 #include "sock-extra.h"
 #include "sock-app.h"
+#include "vlogger/vlogger.h"
 #include "xlio.h"
 
 #include <sys/sendfile.h>
@@ -69,7 +70,8 @@
 
 using namespace std;
 
-#define MODULE_NAME "srdr:"
+#define MODULE_NAME "srdr"
+DOCA_LOG_REGISTER(srdr);
 
 #define srdr_logpanic   __log_panic
 #define srdr_logerr     __log_err
@@ -308,9 +310,9 @@ int socket_internal(int __domain, int __type, int __protocol, bool shadow, bool 
     fd = SOCKET_FAKE_FD;
     if (shadow || !offload_sockets || !g_p_fd_collection) {
         fd = SYSCALL(socket, __domain, __type, __protocol);
-        vlog_printf(VLOG_DEBUG, "ENTER: %s(domain=%s(%d), type=%s(%d), protocol=%d) = %d\n",
-                    __func__, socket_get_domain_str(__domain), __domain,
-                    socket_get_type_str(__type), __type, __protocol, fd);
+        __log_dbg("ENTER: %s(domain=%s(%d), type=%s(%d), protocol=%d) = %d\n", __func__,
+                  socket_get_domain_str(__domain), __domain, socket_get_type_str(__type), __type,
+                  __protocol, fd);
         if (fd < 0) {
             return fd;
         }
@@ -860,7 +862,7 @@ EXPORT_SYMBOL void XLIO_SYMBOL(__res_iclose)(res_state statp, bool free_addr)
        fd. This will break the socket functionality.
        Assume that resolver doesn't use the above scenarios.  */
 
-    srdr_logdbg_entry("");
+    srdr_logdbg_entry(LOG_FUNCTION_CALL);
     for (int ns = 0; ns < statp->_u._ext.nscount; ns++) {
         int sock = statp->_u._ext.nssocks[ns];
         if (sock != -1) {
@@ -2296,7 +2298,7 @@ EXPORT_SYMBOL pid_t XLIO_SYMBOL(fork)(void)
 
         safe_mce_sys().get_env_params();
         vlog_start(PRODUCT_NAME, safe_mce_sys().log_level, safe_mce_sys().log_filename,
-                   safe_mce_sys().log_details, safe_mce_sys().log_colors);
+                   safe_mce_sys().log_colors);
         if (xlio_rdma_lib_reset()) {
             srdr_logerr("Child Process: rdma_lib_reset failed %d %s", errno, strerror(errno));
         }
@@ -2377,7 +2379,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(daemon)(int __nochdir, int __noclose)
 
         safe_mce_sys().get_env_params();
         vlog_start(PRODUCT_NAME, safe_mce_sys().log_level, safe_mce_sys().log_filename,
-                   safe_mce_sys().log_details, safe_mce_sys().log_colors);
+                   safe_mce_sys().log_colors);
         if (xlio_rdma_lib_reset()) {
             srdr_logerr("Child Process: rdma_lib_reset failed %d %s", errno, strerror(errno));
         }
