@@ -321,6 +321,9 @@ int get_header_source();
 extern "C" {
 #endif //__cplusplus
 
+// doca has less log granularity then we use currently
+// we keep the semantics by using our macros which filter
+// based on `g_vlogger_level`
 typedef enum {
     VLOG_INIT = DOCA_LOG_LEVEL_DISABLE,
     VLOG_NONE = DOCA_LOG_LEVEL_DISABLE,
@@ -329,13 +332,13 @@ typedef enum {
     VLOG_WARNING = DOCA_LOG_LEVEL_WARNING,
     VLOG_INFO = DOCA_LOG_LEVEL_INFO,
     VLOG_DEFAULT = VLOG_INFO,
-    VLOG_DETAILS = DOCA_LOG_LEVEL_DEBUG,
+    VLOG_DETAILS = VLOG_INFO + 1,
     VLOG_DEBUG = DOCA_LOG_LEVEL_DEBUG,
     VLOG_FINE = DOCA_LOG_LEVEL_TRACE,
-    VLOG_FUNC = VLOG_FINE,
-    VLOG_FINER = DOCA_LOG_LEVEL_TRACE,
-    VLOG_FUNC_ALL = VLOG_FINER,
-    VLOG_ALL = DOCA_LOG_LEVEL_TRACE /* last element */
+    VLOG_FUNC = DOCA_LOG_LEVEL_TRACE + 2,
+    VLOG_FINER = DOCA_LOG_LEVEL_TRACE + 3,
+    VLOG_FUNC_ALL = DOCA_LOG_LEVEL_TRACE + 4,
+    VLOG_ALL = DOCA_LOG_LEVEL_TRACE + 5 /* last element */
 } vlog_levels_t;
 
 namespace log_level {
@@ -384,27 +387,7 @@ void vlog_start(const char *log_module_name, vlog_levels_t log_level = VLOG_DEFA
                 const char *log_filename = NULL, int log_details = 0, bool colored_log = true);
 void vlog_stop(void);
 
-static inline uint32_t vlog_get_usec_since_start()
-{
-    struct timespec ts_now;
-
-    BULLSEYE_EXCLUDE_BLOCK_START
-    if (gettime(&ts_now)) {
-        printf("%s() gettime() Returned with Error (errno=%d %m)\n", __func__, errno);
-        return (uint32_t)-1;
-    }
-    BULLSEYE_EXCLUDE_BLOCK_END
-
-    if (!g_vlogger_usec_on_startup) {
-        g_vlogger_usec_on_startup = ts_to_usec(&ts_now);
-    }
-
-    return (ts_to_usec(&ts_now) - g_vlogger_usec_on_startup);
-}
-
 #define VLOGGER_STR_SIZE 512
-
-void vlog_output(vlog_levels_t log_level, const char *fmt, ...);
 
 #ifdef __cplusplus
 };

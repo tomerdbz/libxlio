@@ -113,7 +113,7 @@ bool rfs_rule::create(doca_flow_match &match_value, doca_flow_match &match_mask,
     doca_flow_actions *actions = nullptr;
     doca_flow_actions *actions_mask = nullptr;
     if (flow_tag) {
-        rfs_logerr("RFS flow tag %u Priority %hu", flow_tag, priority);
+        rfs_loginfo("RFS flow tag %u Priority %hu", flow_tag, priority);
         memset(&actions_flowtag, 0U, sizeof(actions_flowtag));
         memset(&actions_mask_flowtag, 0U, sizeof(actions_mask_flowtag));
         actions_flowtag.meta.mark = htonl(flow_tag);

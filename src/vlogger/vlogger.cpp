@@ -161,6 +161,24 @@ pid_t gettid(void)
 #pragma BullseyeCoverage off
 #endif
 
+static inline uint32_t vlog_get_usec_since_start()
+{
+    struct timespec ts_now;
+
+    BULLSEYE_EXCLUDE_BLOCK_START
+    if (gettime(&ts_now)) {
+        printf("%s() gettime() Returned with Error (errno=%d %m)\n", __func__, errno);
+        return (uint32_t)-1;
+    }
+    BULLSEYE_EXCLUDE_BLOCK_END
+
+    if (!g_vlogger_usec_on_startup) {
+        g_vlogger_usec_on_startup = ts_to_usec(&ts_now);
+    }
+
+    return (ts_to_usec(&ts_now) - g_vlogger_usec_on_startup);
+}
+
 // Credit for the C++ de-mangler go to:
 // http://tombarta.wordpress.com/2008/08/01/c-stack-traces-with-gcc/
 #include <cxxabi.h>
