@@ -128,11 +128,6 @@ int get_header_source();
         DOCA_LOG(log_level, log_fmt, ##log_args);                                                  \
     } while (0)
 
-#define __log_print(log_level, log_fmt, log_args...)                                               \
-    do {                                                                                           \
-        DOCA_LOG(log_level, log_fmt, ##log_args);                                                  \
-    } while (0)
-
 #define __log_raw_header(log_level, log_fmt, log_args...)                                          \
     do {                                                                                           \
         doca_log(log_level, get_header_source(), __FILE__, __LINE__, __func__, log_fmt,            \
@@ -145,7 +140,7 @@ int get_header_source();
 #define __log_details(log_fmt, log_args...)                                                        \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_DETAILS)                                                       \
-            DOCA_LOG_DBG(log_fmt, ##log_args);                                                     \
+            DOCA_LOG_INFO("[DETAILS] " log_fmt, ##log_args);                                       \
     } while (0)
 #endif
 
@@ -165,7 +160,7 @@ int get_header_source();
 #define __log_fine(log_fmt, log_args...)                                                           \
     do {                                                                                           \
         if (g_vlogger_level >= VLOG_FINE)                                                          \
-            DOCA_LOG_TRC(log_fmt, ##log_args);                                                     \
+            DOCA_LOG_TRC("[FINE] " log_fmt, ##log_args);                                           \
     } while (0)
 #endif
 
@@ -174,8 +169,8 @@ int get_header_source();
 #else
 #define __log_finer(log_fmt, log_args...)                                                          \
     do {                                                                                           \
-        if (g_vlogger_level >= VLOG_FINE)                                                          \
-            DOCA_LOG_TRC(VLOG_FINER, log_fmt, ##log_args);                                         \
+        if (g_vlogger_level >= VLOG_FINER)                                                         \
+            DOCA_LOG_TRC("[FINER] " log_fmt, ##log_args);                                          \
     } while (0)
 #endif /* MAX_DEFINED_LOG_LEVEL */
 
@@ -321,9 +316,12 @@ int get_header_source();
 extern "C" {
 #endif //__cplusplus
 
-// doca has less log granularity then we use currently
-// we keep the semantics by using our macros which filter
-// based on `g_vlogger_level`
+// doca has less log granularity then we have.
+// i.e. - In terms of DOCA - VLOG_DETAILS and VLOG_INFO will generate an identical log
+// using g_vlogger_level and the macros (e.g. - `__log_finer`) the correct annotation will be added
+// e.g. -
+// __log_finer will do DOCA_LOG_LEVEL_DEBUG with "[FINER]" prefix iff
+// g_vlogger_level >= VLOG_FINER
 typedef enum {
     VLOG_INIT = DOCA_LOG_LEVEL_DISABLE,
     VLOG_NONE = DOCA_LOG_LEVEL_DISABLE,

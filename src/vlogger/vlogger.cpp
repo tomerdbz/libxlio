@@ -63,6 +63,9 @@ xlio_log_cb_t g_vlogger_cb = NULL;
 
 DOCA_LOG_REGISTER(logger);
 
+// similiarly to DOCA_DLOG_HDR
+// all the headers calling `__log_raw_header`
+// use the `logger` registered source
 int get_header_source()
 {
     return log_source;
