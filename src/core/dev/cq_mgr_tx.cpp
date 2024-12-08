@@ -34,6 +34,7 @@
 #include <util/valgrind.h>
 #include <sock/sock-redirect.h>
 #include <sock/sock-app.h>
+#include <cinttypes>
 #include "ring_simple.h"
 #include "hw_queue_tx.h"
 
@@ -211,7 +212,7 @@ int cq_mgr_tx::poll_and_process_element_tx(uint64_t *p_cq_poll_sn)
         // All error opcodes have the most significant bit set.
         if (unlikely(cqe->op_own & 0x80) && is_error_opcode(cqe->op_own >> 4)) {
             // m_p_cq_stat->n_tx_cqe_error++; Future counter
-            log_cqe_error(cqe);
+            log_cqe_error(cqe, index);
         }
 
         handle_sq_wqe_prop(index);
@@ -222,7 +223,7 @@ int cq_mgr_tx::poll_and_process_element_tx(uint64_t *p_cq_poll_sn)
     return ret;
 }
 
-void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe)
+void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe, unsigned index)
 {
     struct mlx5_err_cqe *ecqe = (struct mlx5_err_cqe *)cqe;
 
@@ -237,6 +238,9 @@ void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe)
                    ecqe->syndrome, ecqe->vendor_err_synd, *((uint8_t *)&ecqe->rsvd1 + 16),
                    *((uint8_t *)&ecqe->rsvd1 + 17), ntohl(ecqe->s_wqe_opcode_qpn),
                    ntohs(ecqe->wqe_counter));
+
+        sq_wqe_prop *p = &m_hqtx_ptr->m_sq_wqe_idx_to_prop[index];
+        cq_logwarn("cqe: mkey=" PRIu32, p->buf->lkey);
     }
 }
 
