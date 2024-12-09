@@ -727,10 +727,6 @@ inline int hw_queue_tx::fill_wqe_send(xlio_ibv_send_wr *pswr)
         if (unlikely((uintptr_t)dseg >= (uintptr_t)m_sq_wqes_end)) {
             dseg = (struct mlx5_wqe_data_seg *)m_sq_wqes;
         }
-        hwqtx_logerr("BEFORE lkey: %p", pswr->sg_list[0].lkey);
-        pswr->sg_list[i].lkey = 0xdeadbeef;
-        hwqtx_logerr("AFTER lkey: %p", pswr->sg_list[0].lkey);
-
         if (likely(pswr->sg_list[i].length)) {
             dseg->byte_count = htonl(pswr->sg_list[i].length);
             /* Try to copy data to On Device Memory in first */
@@ -827,15 +823,13 @@ inline int hw_queue_tx::fill_wqe_lso(xlio_ibv_send_wr *pswr, int data_len)
     return wqebbs;
 }
 
-void hw_queue_tx::store_current_wqe_prop(mem_buf_desc_t *buf, unsigned credits, xlio_ti *ti,
-                                         const void *wqe_address)
+void hw_queue_tx::store_current_wqe_prop(mem_buf_desc_t *buf, unsigned credits, xlio_ti *ti)
 {
     m_sq_wqe_idx_to_prop[m_sq_wqe_hot_index] = sq_wqe_prop {
         .buf = buf,
         .credits = credits,
         .ti = ti,
         .next = m_sq_wqe_prop_last,
-        .wqe_address = wqe_address,
     };
     m_sq_wqe_prop_last = &m_sq_wqe_idx_to_prop[m_sq_wqe_hot_index];
     if (ti) {
@@ -872,8 +866,7 @@ void hw_queue_tx::send_to_wire(xlio_ibv_send_wr *p_send_wqe, xlio_wr_tx_packet_a
     eseg->cs_flags = (uint8_t)(attr & (XLIO_TX_PACKET_L3_CSUM | XLIO_TX_PACKET_L4_CSUM) & 0xff);
 
     /* Store buffer descriptor */
-    store_current_wqe_prop(reinterpret_cast<mem_buf_desc_t *>(p_send_wqe->wr_id), credits, tis,
-                           ctrl);
+    store_current_wqe_prop(reinterpret_cast<mem_buf_desc_t *>(p_send_wqe->wr_id), credits, tis);
 
     /* Complete WQE */
     int wqebbs = fill_wqe(p_send_wqe);
