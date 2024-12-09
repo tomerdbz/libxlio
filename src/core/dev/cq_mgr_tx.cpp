@@ -35,6 +35,7 @@
 #include <sock/sock-redirect.h>
 #include <sock/sock-app.h>
 #include <cinttypes>
+#include <iomanip>
 #include "ring_simple.h"
 #include "hw_queue_tx.h"
 
@@ -194,6 +195,17 @@ cq_mgr_tx *cq_mgr_tx::get_cq_mgr_from_cq_event(struct ibv_comp_channel *p_cq_cha
     return p_cq_mgr;
 }
 
+static std::string data_to_hex_string(const void *ecqe)
+{
+    const uint8_t *ecqe_data = (uint8_t *)ecqe;
+    std::ostringstream oss;
+    for (uint8_t i = 0; i < 200; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << (unsigned)(ecqe_data[i]);
+    }
+
+    return oss.str();
+}
+
 int cq_mgr_tx::poll_and_process_element_tx(uint64_t *p_cq_poll_sn)
 {
     cq_logfuncall("");
@@ -212,7 +224,7 @@ int cq_mgr_tx::poll_and_process_element_tx(uint64_t *p_cq_poll_sn)
         // All error opcodes have the most significant bit set.
         if (unlikely(cqe->op_own & 0x80) && is_error_opcode(cqe->op_own >> 4)) {
             // m_p_cq_stat->n_tx_cqe_error++; Future counter
-            log_cqe_error(cqe, index);
+            log_cqe_error(cqe);
         }
 
         handle_sq_wqe_prop(index);
@@ -223,7 +235,7 @@ int cq_mgr_tx::poll_and_process_element_tx(uint64_t *p_cq_poll_sn)
     return ret;
 }
 
-void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe, unsigned index)
+void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe)
 {
     struct mlx5_err_cqe *ecqe = (struct mlx5_err_cqe *)cqe;
 
@@ -238,9 +250,15 @@ void cq_mgr_tx::log_cqe_error(struct xlio_mlx5_cqe *cqe, unsigned index)
                    ecqe->syndrome, ecqe->vendor_err_synd, *((uint8_t *)&ecqe->rsvd1 + 16),
                    *((uint8_t *)&ecqe->rsvd1 + 17), ntohl(ecqe->s_wqe_opcode_qpn),
                    ntohs(ecqe->wqe_counter));
-
+        unsigned index = ntohs(cqe->wqe_counter) & (m_hqtx_ptr->m_tx_num_wr - 1);
+        auto wqe = (uint8_t *)(m_hqtx_ptr->m_mlx5_qp.sq.buf) + 64 * index;
         sq_wqe_prop *p = &m_hqtx_ptr->m_sq_wqe_idx_to_prop[index];
-        cq_logwarn("cqe: mkey=" PRIu32, p->buf->lkey);
+        auto wqe2 = p->wqe_address;
+        if (wqe != wqe2) {
+            cq_logwarn("OH NOOOO");
+        }
+        cq_logwarn("bad_wqe: %s", data_to_hex_string(wqe).c_str());
+        cq_logwarn("bad_wqe2: %s", data_to_hex_string(wqe2).c_str());
     }
 }
 

@@ -71,6 +71,7 @@ struct sq_wqe_prop {
     /* Transport interface (TIS/TIR) current WQE holds reference to. */
     xlio_ti *ti;
     struct sq_wqe_prop *next;
+    const void *wqe_address;
 };
 
 // @class hw_queue_tx
@@ -258,7 +259,8 @@ private:
     inline void tls_get_progress_params_wqe(xlio_ti *ti, uint32_t tirn, void *buf, uint32_t lkey);
 #endif /* DEFINED_UTLS */
 
-    inline void store_current_wqe_prop(mem_buf_desc_t *wr_id, unsigned credits, xlio_ti *ti);
+    inline void store_current_wqe_prop(mem_buf_desc_t *wr_id, unsigned credits, xlio_ti *ti,
+                                       const void *wqe_address = nullptr);
     inline int fill_wqe(xlio_ibv_send_wr *p_send_wqe);
     inline int fill_wqe_send(xlio_ibv_send_wr *pswr);
     inline int fill_wqe_lso(xlio_ibv_send_wr *pswr, int data_len);

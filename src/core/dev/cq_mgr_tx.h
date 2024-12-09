@@ -73,7 +73,7 @@ public:
     void reset_notification_armed() { m_b_notification_armed = false; }
 
 private:
-    void log_cqe_error(struct xlio_mlx5_cqe *cqe, unsigned index);
+    void log_cqe_error(struct xlio_mlx5_cqe *cqe);
     void handle_sq_wqe_prop(unsigned index);
 
     void get_cq_event(int count = 1) { xlio_ib_mlx5_get_cq_event(&m_mlx5_cq, count); };
