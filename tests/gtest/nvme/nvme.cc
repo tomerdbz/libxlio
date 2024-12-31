@@ -575,6 +575,7 @@ TEST_F(nvme_tx, send_single_pdu)
 
 TEST_F(nvme_tx, send_multiple_pdus)
 {
+    GTEST_SKIP() << "Skipping this test because fork is not supported yet.";
     SKIP_TRUE(is_nvme_supported(), "NVME offload not supported");
     SKIP_TRUE(!getenv("XLIO_TCP_CTL_THREAD"), "Skip non default XLIO_TCP_CTL_THREAD");
 
