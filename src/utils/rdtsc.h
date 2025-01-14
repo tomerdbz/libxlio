@@ -100,61 +100,9 @@ static bool get_cpu_hz(double &hz_min, double &hz_max)
     return true;
 }
 
-/**
- * Calibrate TSC with CPU speed
- * @return number of tsc ticks per second
- */
-static inline tscval_t get_tsc_rate_per_second()
-{
-    static tscval_t tsc_per_second = TSCVAL_INITIALIZER;
-    if (!tsc_per_second) {
-        double hz_min = -1, hz_max = -1;
-        if (get_cpu_hz(hz_min, hz_max)) {
-            tsc_per_second = (tscval_t)hz_max;
-        } else {
-            // failure calibrating TSC to CPU speed
-            tsc_per_second = 2 * 1e6; // assume 2 MHz CPU speed
-        }
-    }
-    return tsc_per_second;
-}
-
-/**
- * 'gettimeofday()' based on RDTSC
- * Re-sync with system clock no more then once a second
- */
-inline int gettimefromtsc(struct timespec *ts)
-{
-    static tscval_t tsc_start = TSCVAL_INITIALIZER;
-    static struct timespec ts_start = TIMESPEC_INITIALIZER;
-
-    struct timespec ts_delta = TIMESPEC_INITIALIZER;
-    tscval_t tsc_now, tsc_delta;
-    uint64_t nsec_delta = 0;
-
-    if (!ts_isset(&ts_start)) {
-        clock_gettime(CLOCK_MONOTONIC, &ts_start);
-        gettimeoftsc(&tsc_start);
-    }
-    gettimeoftsc(&tsc_now);
-    tsc_delta = tsc_now - tsc_start;
-    nsec_delta = tsc_delta * NSEC_PER_SEC / get_tsc_rate_per_second();
-
-    ts_delta.tv_sec = nsec_delta / NSEC_PER_SEC;
-    ts_delta.tv_nsec = nsec_delta - ts_delta.tv_sec * NSEC_PER_SEC;
-    ts_add(&ts_start, &ts_delta, ts);
-
-    // Once a second re-sync our start time with real time-of-day
-    if (tsc_delta > get_tsc_rate_per_second()) {
-        ts_clear(&ts_start);
-    }
-
-    return 0;
-}
-
 static inline int gettime(struct timespec *ts)
 {
-    return gettimefromtsc(ts);
+    return clock_gettime(CLOCK_MONOTONIC, ts);
 }
 
 static inline int gettime(struct timeval *tv)
