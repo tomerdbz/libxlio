@@ -7,17 +7,18 @@
 #ifndef SYS_VARS_H
 #define SYS_VARS_H
 
-#include <stdio.h>
-#include <sched.h>
-#include <string>
 #include <netinet/in.h>
+#include <sched.h>
+#include <stdio.h>
+#include <string>
 
-#include "vtypes.h"
 #include "config.h"
+#include "vtypes.h"
 
+#include "core/config/config_registry.h"
 #include "core/ib/base/verbs_extra.h"
-#include "core/util/sysctl_reader.h"
 #include "core/util/agent_def.h"
+#include "core/util/sysctl_reader.h"
 #include "core/xlio_extra.h"
 
 typedef enum {
@@ -301,7 +302,7 @@ public:
     enum hyper_t { HYPER_NONE = 0, HYPER_XEN, HYPER_KVM, HYPER_MSHV, HYPER_VMWARE };
 
 public:
-    void get_env_params();
+    void get_params();
 
     // Update parameters for multi-process applications
     void update_multi_process_params();
@@ -318,7 +319,10 @@ public:
     char log_filename[PATH_MAX];
     char stats_filename[PATH_MAX];
     char stats_shmem_dirname[PATH_MAX];
-    char conf_filename[PATH_MAX];
+
+    // can be used both for legacy config file path and transport control rules
+    char acceleration_rules[PATH_MAX];
+
     char service_notify_dir[PATH_MAX];
     bool service_enable;
     bool log_colors;
@@ -360,9 +364,10 @@ public:
     uint32_t rx_ready_byte_min_limit;
     uint32_t rx_prefetch_bytes;
     uint32_t rx_prefetch_bytes_before_poll;
-    uint32_t rx_cq_drain_rate_nsec; // If enabled this will cause the Rx to drain all wce in CQ
-                                    // before returning to user, Else (Default: Disbaled) it will
-                                    // return when first ready packet is in socket queue
+    uint32_t rx_cq_drain_rate_nsec; // If enabled this will cause the Rx to drain
+                                    // all wce in CQ before returning to user,
+                                    // Else (Default: Disbaled) it will return
+                                    // when first ready packet is in socket queue
     uint32_t rx_delta_tsc_between_cq_polls;
 
     uint32_t strq_stride_num_per_rwqe;
@@ -438,10 +443,11 @@ public:
 #ifdef DEFINED_UTLS
     bool enable_utls_rx;
     bool enable_utls_tx;
-    // DEK cache size high-watermark. Max number of DEKs to be stored in the cache.
+    // DEK cache size high-watermark. Max number of DEKs to be stored in the
+    // cache.
     size_t utls_high_wmark_dek_cache_size;
-    // DEK cache size low-watermark. Min number of available DEKs required in the cache
-    // to perform Crypto-Sync and reuse.
+    // DEK cache size low-watermark. Min number of available DEKs required in the
+    // cache to perform Crypto-Sync and reuse.
     size_t utls_low_wmark_dek_cache_size;
 #endif /* DEFINED_UTLS */
     uint32_t timer_netlink_update_msec;
@@ -452,8 +458,9 @@ public:
     uint32_t neigh_num_err_retries;
 
     sysctl_reader_t &sysctl_reader;
-    // Workaround for #3440429: postpone close(2) to the socket destructor, so the sockfd is closed
-    // after the rfs rule is destroyed. Otherwise, flow_tag or TCP port can be reused too early.
+    // Workaround for #3440429: postpone close(2) to the socket destructor, so the
+    // sockfd is closed after the rfs rule is destroyed. Otherwise, flow_tag or
+    // TCP port can be reused too early.
     bool deferred_close;
     bool tcp_abort_on_close;
     bool rx_poll_on_tx_tcp;
@@ -485,25 +492,57 @@ public:
     } m_ioctl;
 
 private:
+    void get_app_name();
+    void legacy_get_env_params();
+    void initialize_base_variables(const config_registry &registry);
+    void read_hypervisor_info();
+    void configure_socketxtreme(const config_registry &registry);
+    void configure_striding_rq(const config_registry &registry);
+    void detect_application_profile(const config_registry &registry);
+    void apply_spec_profile_optimizations();
+    void apply_sockperf_ultra_latency_profile();
+    void apply_sockperf_latency_profile();
+    void apply_nginx_profile();
+    void apply_nvme_bf3_profile();
+    void configure_monitor(const config_registry &registry);
+    void configure_buffer_allocation(const config_registry &registry);
+    void configure_tcp_parameters(const config_registry &registry);
+    void configure_buffer_sizes(const config_registry &registry);
+    void configure_polling_mechanism(const config_registry &registry);
+    void configure_completion_queue(const config_registry &registry);
+    void configure_thread_affinity(const config_registry &registry);
+    void configure_memory_limits(const config_registry &registry);
+    void configure_multicast_settings(const config_registry &registry);
+    void configure_network_protocols(const config_registry &registry);
+    void configure_application_specifics(const config_registry &registry);
+    void configure_syscall_behavior(const config_registry &registry);
+    void configure_network_timing(const config_registry &registry);
+    void apply_config_from_registry();
     void print_xlio_load_failure_msg();
     int list_to_cpuset(char *cpulist, cpu_set_t *cpu_set);
     int hex_to_cpuset(char *start, cpu_set_t *cpu_set);
     int env_to_cpuset(char *orig_start, cpu_set_t *cpu_set);
-    void read_env_variable_with_pid(char *mce_sys_name, size_t mce_sys_max_size, char *env_ptr);
+    void read_env_variable_with_pid(char *mce_sys_name, size_t mce_sys_max_size,
+                                    const char *env_ptr);
     bool check_cpuinfo_flag(const char *flag);
     bool cpuid_hv();
     const char *cpuid_hv_vendor();
     void read_hv();
-    void read_strq_strides_num();
-    void read_strq_stride_size_bytes();
+    void read_strq_strides_num(const config_registry &registry);
+    void read_strq_stride_size_bytes(const config_registry &registry);
+    void legacy_read_strq_strides_num();
+    void legacy_read_strq_stride_size_bytes();
 
     // prevent unautothrized creation of objects
+    // coverity[CTOR_DTOR_LEAK] suppression for app_name member is needed because Coverity
+    // incorrectly flags it as a memory leak
     mce_sys_var()
         : sysctl_reader(sysctl_reader_t::instance())
         , m_ioctl {}
     {
         // coverity[uninit_member]
-        get_env_params();
+        // coverity[CTOR_DTOR_LEAK]
+        get_params();
     }
     mce_sys_var(const mce_sys_var &);
     mce_sys_var &operator=(const mce_sys_var &);
@@ -511,6 +550,10 @@ private:
 
 extern mce_sys_var &safe_mce_sys();
 
+/*
+ * This block consists of library specific configuration
+ * environment variables
+ */
 /*
  * This block consists of library specific configuration
  * environment variables
@@ -665,6 +708,167 @@ extern mce_sys_var &safe_mce_sys();
 #define SYS_VAR_SKIP_POLL_IN_RX                "XLIO_SKIP_POLL_IN_RX"
 #define SYS_VAR_MULTILOCK                      "XLIO_MULTILOCK"
 
+#define NEW_CONFIG_VAR_PRINT_REPORT        "monitor.exit_report"
+#define NEW_CONFIG_VAR_LOG_LEVEL           "monitor.log.level"
+#define NEW_CONFIG_VAR_LOG_DETAILS         "monitor.log.details"
+#define NEW_CONFIG_VAR_LOG_FILENAME        "monitor.log.file_path"
+#define NEW_CONFIG_VAR_STATS_FILENAME      "monitor.stats.file_path"
+#define NEW_CONFIG_VAR_STATS_SHMEM_DIRNAME "monitor.stats.shmem_dir"
+#define NEW_CONFIG_VAR_SERVICE_DIR         "core.daemon.dir"
+#define NEW_CONFIG_VAR_SERVICE_ENABLE      "core.daemon.enable"
+#define NEW_CONFIG_VAR_LOG_COLORS          "monitor.log.colors"
+#define NEW_CONFIG_VAR_APPLICATION_ID      "acceleration_control.app_id"
+#define NEW_CONFIG_VAR_HANDLE_SIGINTR      "core.signals.sigint.exit"
+#define NEW_CONFIG_VAR_HANDLE_SIGSEGV      "core.signals.sigsegv.backtrace"
+#define NEW_CONFIG_VAR_STATS_FD_NUM        "monitor.stats.fd_num"
+#define NEW_CONFIG_VAR_QUICK_START         "core.quick_init"
+
+#define NEW_CONFIG_VAR_RING_ALLOCATION_LOGIC_TX "performance.rings.tx.allocation_logic"
+#define NEW_CONFIG_VAR_RING_ALLOCATION_LOGIC_RX "performance.rings.rx.allocation_logic"
+#define NEW_CONFIG_VAR_RING_MIGRATION_RATIO_TX  "performance.rings.tx.migration_ratio"
+#define NEW_CONFIG_VAR_RING_MIGRATION_RATIO_RX  "performance.rings.rx.migration_ratio"
+#define NEW_CONFIG_VAR_RING_LIMIT_PER_INTERFACE "performance.rings.max_per_interface"
+#define NEW_CONFIG_VAR_RING_DEV_MEM_TX          "performance.rings.tx.max_on_device_memory"
+
+#define NEW_CONFIG_VAR_ZC_CACHE_THRESHOLD    "core.syscall.sendfile_cache_limit"
+#define NEW_CONFIG_VAR_TX_BUF_SIZE           "performance.buffers.tx.buf_size"
+#define NEW_CONFIG_VAR_TCP_NODELAY_TRESHOLD  "network.protocols.tcp.nodelay.byte_threshold"
+#define NEW_CONFIG_VAR_TX_NUM_WRE            "performance.rings.tx.ring_elements_count"
+#define NEW_CONFIG_VAR_TX_NUM_WRE_TO_SIGNAL  "performance.rings.tx.completion_batch_size"
+#define NEW_CONFIG_VAR_TX_MAX_INLINE         "performance.rings.tx.max_inline_size"
+#define NEW_CONFIG_VAR_TX_MC_LOOPBACK        "network.multicast.mc_loopback"
+#define NEW_CONFIG_VAR_TX_NONBLOCKED_EAGAINS "performance.polling.nonblocking_eagain"
+#define NEW_CONFIG_VAR_TX_PREFETCH_BYTES     "performance.buffers.tx.prefetch_size"
+#define NEW_CONFIG_VAR_TX_BUFS_BATCH_TCP     "performance.rings.tx.tcp_buffer_batch"
+#define NEW_CONFIG_VAR_TX_SEGS_BATCH_TCP     "performance.buffers.tcp_segments.socket_batch_size"
+
+#define NEW_CONFIG_VAR_STRQ                            "hardware_features.striding_rq.enable"
+#define NEW_CONFIG_VAR_STRQ_NUM_STRIDES                "hardware_features.striding_rq.strides_num"
+#define NEW_CONFIG_VAR_STRQ_STRIDE_SIZE_BYTES          "hardware_features.striding_rq.stride_size"
+#define NEW_CONFIG_VAR_STRQ_STRIDES_COMPENSATION_LEVEL "performance.rings.rx.spare_strides"
+
+#define NEW_CONFIG_VAR_RX_BUF_SIZE                   "performance.buffers.rx.buf_size"
+#define NEW_CONFIG_VAR_RX_NUM_WRE                    "performance.rings.rx.ring_elements_count"
+#define NEW_CONFIG_VAR_RX_NUM_WRE_TO_POST_RECV       "performance.rings.rx.post_batch_size"
+#define NEW_CONFIG_VAR_RX_NUM_POLLS                  "performance.polling.blocking_rx_poll_usec"
+#define NEW_CONFIG_VAR_RX_NUM_POLLS_INIT             "performance.polling.offload_transition_poll_count"
+#define NEW_CONFIG_VAR_RX_UDP_POLL_OS_RATIO          "performance.polling.rx_kernel_fd_attention_level"
+#define NEW_CONFIG_VAR_HW_TS_CONVERSION_MODE         "network.timing.hw_ts_conversion"
+#define NEW_CONFIG_VAR_RX_POLL_YIELD                 "performance.polling.yield_on_poll"
+#define NEW_CONFIG_VAR_RX_BYTE_MIN_LIMIT             "performance.override_rcvbuf_limit"
+#define NEW_CONFIG_VAR_RX_PREFETCH_BYTES             "performance.buffers.rx.prefetch_size"
+#define NEW_CONFIG_VAR_RX_PREFETCH_BYTES_BEFORE_POLL "performance.buffers.rx.prefetch_before_poll"
+#define NEW_CONFIG_VAR_RX_CQ_DRAIN_RATE_NSEC         "performance.completion_queue.rx_drain_rate_nsec"
+#define NEW_CONFIG_VAR_GRO_STREAMS_MAX               "performance.max_gro_streams"
+#define NEW_CONFIG_VAR_DISABLE_FLOW_TAG              "performance.steering_rules.disable_flowtag"
+#define NEW_CONFIG_VAR_TCP_2T_RULES                  "performance.steering_rules.tcp.2t_rules"
+#define NEW_CONFIG_VAR_TCP_3T_RULES                  "performance.steering_rules.tcp.3t_rules"
+#define NEW_CONFIG_VAR_UDP_3T_RULES                  "performance.steering_rules.udp.3t_rules"
+#define NEW_CONFIG_VAR_ETH_MC_L2_ONLY_RULES          "performance.steering_rules.only_mc_l2_rules"
+#define NEW_CONFIG_VAR_MC_FORCE_FLOWTAG              "network.multicast.mc_flowtag_acceleration"
+#define NEW_CONFIG_VAR_TX_SEGS_RING_BATCH_TCP        "performance.buffers.tcp_segments.ring_batch_size"
+#define NEW_CONFIG_VAR_TX_SEGS_POOL_BATCH_TCP        "performance.buffers.tcp_segments.pool_batch_size"
+
+#define NEW_CONFIG_VAR_SELECT_CPU_USAGE_STATS "monitor.stats.cpu_usage"
+#define NEW_CONFIG_VAR_SELECT_NUM_POLLS       "performance.polling.iomux.poll_usec"
+#define NEW_CONFIG_VAR_SELECT_POLL_OS_FORCE   "performance.polling.iomux.poll_os_force"
+#define NEW_CONFIG_VAR_SELECT_POLL_OS_RATIO   "performance.polling.iomux.poll_os_ratio"
+#define NEW_CONFIG_VAR_SELECT_SKIP_OS         "performance.polling.iomux.skip_os"
+
+#define NEW_CONFIG_VAR_CQ_MODERATION_ENABLE                                                        \
+    "performance.completion_queue.interrupt_moderation.enable"
+#define NEW_CONFIG_VAR_CQ_MODERATION_COUNT                                                         \
+    "performance.completion_queue.interrupt_moderation.packet_count"
+#define NEW_CONFIG_VAR_CQ_MODERATION_PERIOD_USEC                                                   \
+    "performance.completion_queue.interrupt_moderation.period_usec"
+#define NEW_CONFIG_VAR_CQ_AIM_MAX_COUNT                                                            \
+    "performance.completion_queue.interrupt_moderation.adaptive_count"
+#define NEW_CONFIG_VAR_CQ_AIM_MAX_PERIOD_USEC                                                      \
+    "performance.completion_queue.interrupt_moderation.adaptive_period_usec"
+#define NEW_CONFIG_VAR_CQ_AIM_INTERVAL_MSEC                                                        \
+    "performance.completion_queue.interrupt_moderation.adaptive_change_"                           \
+    "frequency_msec"
+#define NEW_CONFIG_VAR_CQ_AIM_INTERRUPTS_RATE_PER_SEC                                              \
+    "performance.completion_queue.interrupt_moderation.adaptive_interrupt_per_sec"
+
+#define NEW_CONFIG_VAR_CQ_POLL_BATCH_MAX        "performance.polling.max_rx_poll_batch"
+#define NEW_CONFIG_VAR_PROGRESS_ENGINE_INTERVAL "performance.completion_queue.periodic_drain_msec"
+#define NEW_CONFIG_VAR_PROGRESS_ENGINE_WCE_MAX                                                     \
+    "performance.completion_queue.periodic_drain_max_cqes"
+#define NEW_CONFIG_VAR_CQ_KEEP_QP_FULL           "performance.completion_queue.keep_full"
+#define NEW_CONFIG_VAR_QP_COMPENSATION_LEVEL     "performance.rings.rx.spare_buffers"
+#define NEW_CONFIG_VAR_MAX_TSO_SIZE              "hardware_features.tcp.tso.max_size"
+#define NEW_CONFIG_VAR_USER_HUGE_PAGE_SIZE       "extra_api.hugepage_size"
+#define NEW_CONFIG_VAR_OFFLOADED_SOCKETS         "acceleration_control.default_acceleration"
+#define NEW_CONFIG_VAR_TIMER_RESOLUTION_MSEC     "performance.threading.internal_handler.timer_msec"
+#define NEW_CONFIG_VAR_TCP_TIMER_RESOLUTION_MSEC "network.protocols.tcp.timer_msec"
+#define NEW_CONFIG_VAR_TCP_CTL_THREAD            "performance.threading.internal_handler.behavior"
+#define NEW_CONFIG_VAR_TCP_TIMESTAMP_OPTION      "network.protocols.tcp.timestamps"
+#define NEW_CONFIG_VAR_TCP_NODELAY               "network.protocols.tcp.nodelay.enable"
+#define NEW_CONFIG_VAR_TCP_QUICKACK              "network.protocols.tcp.quickack"
+#define NEW_CONFIG_VAR_TCP_PUSH_FLAG             "network.protocols.tcp.push"
+#define NEW_CONFIG_VAR_AVOID_SYS_CALLS_ON_TCP_FD "core.syscall.avoid_ctl_syscalls"
+#define NEW_CONFIG_VAR_ALLOW_PRIVILEGED_SOCK_OPT "core.syscall.allow_privileged_sockopt"
+#define NEW_CONFIG_VAR_WAIT_AFTER_JOIN_MSEC      "network.multicast.wait_after_join_msec"
+#define NEW_CONFIG_VAR_BUFFER_BATCHING_MODE      "performance.buffers.batching_mode"
+#define NEW_CONFIG_VAR_MEM_ALLOC_TYPE            "core.resources.hugepages.enable"
+#define NEW_CONFIG_VAR_MEMORY_LIMIT              "core.resources.memory_limit"
+#define NEW_CONFIG_VAR_MEMORY_LIMIT_USER         "core.resources.external_memory_limit"
+#define NEW_CONFIG_VAR_HEAP_METADATA_BLOCK       "core.resources.heap_metadata_block_size"
+#define NEW_CONFIG_VAR_HUGEPAGE_SIZE             "core.resources.hugepages.size"
+#define NEW_CONFIG_VAR_FORK                      "core.syscall.fork_support"
+#define NEW_CONFIG_VAR_CLOSE_ON_DUP2             "core.syscall.dup2_close_fd"
+#define NEW_CONFIG_VAR_MTU                       "network.protocols.ip.mtu"
+#if defined(DEFINED_NGINX)
+#define NEW_CONFIG_VAR_NGINX_WORKERS_NUM                 "applications.nginx.workers_num"
+#define NEW_CONFIG_VAR_NGINX_UDP_POOL_SIZE               "applications.nginx.udp_pool_size"
+#define NEW_CONFIG_VAR_NGINX_UDP_POOL_RX_NUM_BUFFS_REUSE "applications.nginx.udp_socket_pool_reuse"
+#endif
+#if defined(DEFINED_ENVOY)
+#define NEW_CONFIG_VAR_ENVOY_WORKERS_NUM "XLIO_ENVOY_WORKERS_NUM"
+#endif /* DEFINED_ENVOY */
+#if defined(DEFINED_NGINX) || defined(DEFINED_ENVOY)
+#define NEW_CONFIG_VAR_SRC_PORT_STRIDE "applications.nginx.src_port_stride"
+#define NEW_CONFIG_VAR_DISTRIBUTE_CQ   "applications.nginx.distribute_cq"
+#endif
+#define NEW_CONFIG_VAR_TCP_MAX_SYN_RATE "network.protocols.tcp.max_syn_rate"
+#define NEW_CONFIG_VAR_MSS              "network.protocols.tcp.mss"
+#define NEW_CONFIG_VAR_TCP_CC_ALGO      "network.protocols.tcp.congestion_control"
+#define NEW_CONFIG_VAR_SPEC             "profiles.spec"
+
+#define NEW_CONFIG_VAR_SOCKETXTREME "extra_api.socketextreme"
+#define NEW_CONFIG_VAR_TSO          "hardware_features.tcp.tso.enable"
+#ifdef DEFINED_UTLS
+#define NEW_CONFIG_VAR_UTLS_RX "hardware_features.tcp.tls_offload.rx_enable"
+#define NEW_CONFIG_VAR_UTLS_TX "hardware_features.tcp.tls_offload.tx_enable"
+#define NEW_CONFIG_VAR_UTLS_HIGH_WMARK_DEK_CACHE_SIZE                                              \
+    "hardware_features.tcp.tls_offload.dek_cache_max_size"
+#define NEW_CONFIG_VAR_UTLS_LOW_WMARK_DEK_CACHE_SIZE                                               \
+    "hardware_features.tcp.tls_offload.dek_cache_min_size"
+#endif /* DEFINED_UTLS */
+
+#define NEW_CONFIG_VAR_LRO "hardware_features.tcp.lro"
+
+#define NEW_CONFIG_VAR_INTERNAL_THREAD_AFFINITY "performance.threading.cpu_affinity"
+#define NEW_CONFIG_VAR_INTERNAL_THREAD_CPUSET   "performance.threading.cpuset"
+#define NEW_CONFIG_VAR_INTERNAL_THREAD_ARM_CQ                                                      \
+    "performance.threading.internal_handler.wakeup_per_packet"
+
+#define NEW_CONFIG_VAR_NETLINK_TIMER_MSEC "network.neighbor.update_interval_msec"
+
+#define NEW_CONFIG_VAR_NEIGH_UC_ARP_QUATA      "network.neighbor.arp.uc_retries"
+#define NEW_CONFIG_VAR_NEIGH_UC_ARP_DELAY_MSEC "network.neighbor.arp.uc_delay_msec"
+#define NEW_CONFIG_VAR_NEIGH_NUM_ERR_RETRIES   "network.neighbor.errors_before_reset"
+
+#define NEW_CONFIG_VAR_DEFERRED_CLOSE                 "core.syscall.deferred_close"
+#define NEW_CONFIG_VAR_TCP_ABORT_ON_CLOSE             "network.protocols.tcp.linger_0"
+#define NEW_CONFIG_VAR_RX_POLL_ON_TX_TCP              "performance.polling.rx_poll_on_tx_tcp"
+#define NEW_CONFIG_VAR_RX_CQ_WAIT_CTRL                "performance.polling.rx_cq_wait_ctrl"
+#define NEW_CONFIG_VAR_TRIGGER_DUMMY_SEND_GETSOCKNAME "core.syscall.getsockname_dummy_send"
+#define NEW_CONFIG_VAR_TCP_SEND_BUFFER_SIZE           "network.protocols.tcp.wmem"
+#define NEW_CONFIG_VAR_SKIP_POLL_IN_RX                "performance.polling.skip_cq_on_rx"
+#define NEW_CONFIG_VAR_MULTILOCK                      "performance.threading.mutex_over_spinlock"
+
 /*
  * This block consists of default values for library specific
  * configuration variables
@@ -775,7 +979,7 @@ extern mce_sys_var &safe_mce_sys();
 #define MCE_DEFAULT_MEMORY_LIMIT_USER              (0)
 #define MCE_DEFAULT_HEAP_METADATA_BLOCK            (32LU * 1024 * 1024)
 #define MCE_DEFAULT_HUGEPAGE_SIZE                  (0)
-#define MCE_MAX_HUGEPAGE_SIZE                      (1ULL << 63ULL)
+#define MCE_MAX_HUGEPAGE_SIZE                      (1ULL << 63ULL) - 1
 #define MCE_DEFAULT_FORK_SUPPORT                   (true)
 #define MCE_DEFAULT_CLOSE_ON_DUP2                  (true)
 #define MCE_DEFAULT_MTU                            (0)

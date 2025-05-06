@@ -77,6 +77,9 @@ AC_CONFIG_MACRO_DIR(config/m4)
 #
 AM_INIT_AUTOMAKE(foreign [subdir-objects])
 
+# Configure third party libs
+AC_CONFIG_SUBDIRS([third_party/json-c])
+
 # Set non-verbose make by default
 #
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
@@ -84,6 +87,7 @@ m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 m4_include([config/m4/func.m4])
 m4_include([config/m4/opt.m4])
 m4_include([config/m4/verbs.m4])
+m4_include([config/m4/json.m4])
 m4_include([config/m4/dpcp.m4])
 m4_include([config/m4/nl.m4])
 m4_include([config/m4/prof.m4])
@@ -312,6 +316,7 @@ AC_CHECK_LIB([rt], [clock_gettime])
 AC_CHECK_LIB([pthread], [pthread_create])
 
 CHECK_NL_LIB()
+CHECK_JSON_LIB()
 
 dnl===-----------------------------------------------------------------------===
 dnl===
@@ -413,9 +418,11 @@ AC_CONFIG_FILES([
 		src/state_machine/Makefile
 		tests/Makefile
 		tests/gtest/Makefile
+		tests/unit_tests/Makefile
 		tools/Makefile
 		tools/daemon/Makefile
 		docs/man/Makefile
+		third_party/Makefile
 		contrib/scripts/xlio.init
 		contrib/scripts/xlio.service
 		contrib/scripts/libxlio.spec
