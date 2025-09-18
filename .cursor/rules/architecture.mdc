@@ -1,0 +1,271 @@
+---
+globs: **/*.cpp,**/*.h,**/*.cc,**/*.c
+alwaysApply: false
+---
+# libxlio Architecture Guide
+
+Accelerated IO SW library (XLIO) - High-performance network acceleration library
+
+## Project Overview
+
+libxlio is a high-performance network acceleration library that provides socket API acceleration through InfiniBand/RDMA hardware. The library intercepts standard socket calls and redirects them to accelerated network hardware for improved performance.
+
+**Key Features:**
+- Kernel-bypass architecture for high bandwidth and low CPU usage
+- Hardware-based direct copy between application memory and network interface
+- Support for TLS encryption/decryption with Crypto Enabled NVIDIA ConnectX
+- Hardware features: LRO/TSO, Striding-RQ for increased TCP performance
+- Compatible with both POSIX socket and XLIO Ultra APIs
+- No application code changes required
+
+**Technology Stack:**
+- **Language**: C++11 with C compatibility layer
+- **Build System**: Autotools (autoconf/automake) with libtool
+- **Key Dependencies**: OFED, InfiniBand verbs, DPCP, JSON-C, Netlink libraries
+- **Testing**: Google Test framework, unit tests, performance tests
+- **Supported Platforms**: x86_64, ARM
+- **Supported Transports**: IPv4/6, TCP, UDP
+
+## Core Architecture
+
+### Socket Interception Layer
+- **LD_PRELOAD mechanism**: Library intercepts standard socket calls transparently
+- **Socket abstraction hierarchy**: `sockinfo` → `sockinfo_tcp`/`sockinfo_udp`/`sockinfo_ulp`
+- **File descriptor management**: `fd_collection` manages socket lifecycle
+- **Event-driven I/O**: All operations are event-driven through polling groups
+
+### Memory Management Patterns
+- **Buffer pools**: Pre-allocated memory pools for zero-copy operations
+- **Ring buffers**: Circular buffers for data transmission (simple, bonded, slave types)
+- **Huge page optimization**: Automatic huge page allocation for better TLB performance
+- **Zero-copy operations**: Direct memory access between application and network interface
+
+### Hardware Abstraction Layer
+- **InfiniBand verbs**: Low-level RDMA operations through `ib_ctx_handler`
+- **Device management**: `net_device_entry` and `net_device_table_mgr` for hardware abstraction
+- **Queue management**: CQ (Completion Queue) and QP (Queue Pair) management
+- **Hardware offloading**: TSO, LRO, GRO, RFS for performance optimization
+
+### Data Flow
+1. Application makes standard socket call (socket, bind, connect, send, recv, etc.)
+2. XLIO intercepts via LD_PRELOAD and redirects to accelerated path
+3. Hardware acceleration through InfiniBand/RDMA with zero-copy operations
+4. Direct memory transfer between application buffers and network interface
+5. Event-driven completion handling through polling groups
+
+### Execution Modes
+- **R2C (Run-to-Completion)**: Single-threaded processing for maximum performance
+- **Worker Threads**: Multi-threaded processing with dedicated worker threads
+- **Polling Groups**: Event management and callback registration for concurrent operations
+
+## File Organization
+
+```
+src/
+├── core/           # Core library functionality
+│   ├── config/     # Configuration management (JSON schema, registry)
+│   ├── dev/        # Device and hardware abstraction (rings, CQs, buffers)
+│   ├── event/      # Event handling and threading (poll groups, workers)
+│   ├── ib/         # InfiniBand specific code (verbs, MLX5)
+│   ├── iomux/      # I/O multiplexing (select, poll, epoll)
+│   ├── lwip/       # Lightweight IP stack (TCP implementation)
+│   ├── netlink/    # Netlink communication (routing, neighbors)
+│   ├── proto/      # Protocol handling (TCP, UDP, routing, ARP)
+│   ├── sock/       # Socket abstraction layer (sockinfo classes)
+│   └── util/       # Utility functions (memory, sys vars, instrumentation)
+├── stats/          # Statistics and monitoring
+├── state_machine/  # State machine implementations
+├── utils/          # Common utilities
+└── vlogger/        # Logging system
+
+tests/
+├── unit_tests/     # Unit tests using Google Test
+├── gtest/          # Integration tests
+└── extra_api/      # Extra API tests
+
+docs/
+├── configuration.md    # Build configuration options
+├── coding-style.md     # Code style guidelines
+└── contributing.md     # Contribution guidelines
+```
+
+## Key Terminology
+
+### Core Components
+- **Ring**: Circular buffer for data transmission, can be simple, bonded, or slave
+- **CQ (Completion Queue)**: Hardware queue for completion notifications
+- **QP (Queue Pair)**: InfiniBand communication endpoint
+- **RFS (Receive Flow Steering)**: Hardware-based packet steering
+- **GRO (Generic Receive Offload)**: Hardware packet aggregation
+- **TSO (TCP Segmentation Offload)**: Hardware TCP segmentation
+- **LRO (Large Receive Offload)**: Hardware packet reassembly
+
+### Execution Modes
+- **R2C (Run-to-Completion)**: Single-threaded processing
+- **Worker Threads**: Multi-threaded processing with dedicated worker threads
+
+### Memory Management
+- **Buffer Pools**: Pre-allocated memory pools for network buffers
+- **Huge Pages**: Large memory pages for better TLB performance
+- **Zero-Copy**: Direct memory access without copying
+
+### Network Stack
+- **lwIP**: Lightweight IP stack for TCP implementation
+- **Netlink**: Kernel-user space communication for routing/neighbors
+- **ARP**: Address Resolution Protocol implementation
+- **Routing**: Route table management and packet forwarding
+
+### Hardware Abstraction
+- **InfiniBand Verbs**: Low-level InfiniBand operations
+- **MLX5**: Mellanox ConnectX-5/6 specific optimizations
+- **DPCP**: Direct Packet Control Plane for advanced features
+- **OFED**: OpenFabrics Enterprise Distribution for InfiniBand/RDMA support
+
+## Common Code Patterns
+
+### Socket Implementation Pattern
+```cpp
+class sockinfo_new_protocol : public sockinfo {
+public:
+    sockinfo_new_protocol(int fd, int domain);
+    
+    // Override required virtual methods
+    virtual int bind(const struct sockaddr *addr, socklen_t addrlen) override;
+    virtual int connect(const struct sockaddr *addr, socklen_t addrlen) override;
+    virtual ssize_t send(const void *buf, size_t len, int flags) override;
+    virtual ssize_t recv(void *buf, size_t len, int flags) override;
+    
+    // Protocol-specific methods
+    void handle_protocol_specific_event();
+};
+```
+
+### Event Handler Pattern
+```cpp
+class new_event_handler : public event_handler {
+public:
+    virtual void handle_event() override;
+    virtual void handle_timer_expired(void *user_data) override;
+    
+    // Register with poll group
+    void register_with_poll_group(poll_group *pg);
+};
+```
+
+### Configuration Access Pattern
+```cpp
+// Access configuration through registry
+config_registry &registry = config_registry::get_instance();
+
+// Type-safe parameter access with validation
+auto memory_limit = registry.get_parameter<int>("core.resources.memory_limit");
+auto tcp_nodelay = registry.get_parameter<bool>("network.protocols.tcp.nodelay.enable");
+```
+
+## Key Data Structures
+
+```cpp
+class sockinfo {
+    // Base socket information class
+    // Inherited by sockinfo_tcp, sockinfo_udp, sockinfo_ulp
+};
+
+class net_device_entry {
+    // Network device abstraction
+    // Handles InfiniBand context and queue pairs
+    // Inherits from event_handler_ibverbs and timer_handler
+};
+
+class ring {
+    // Ring buffer for data transmission
+    // Types: ring_simple, ring_bond, ring_slave
+};
+
+class buffer_pool {
+    // Memory pool for network buffers
+    // Manages allocation and deallocation
+};
+
+class poll_group {
+    // Manages I/O multiplexing and event handling
+    // Handles epoll, select, poll operations
+};
+
+class worker_thread {
+    // Worker thread for processing events
+    // Part of worker_thread_manager
+};
+```
+
+## Configuration System
+
+### Architecture
+- **Registry**: `config_registry` class manages all configuration parameters
+- **Schema**: JSON Schema validation in `xlio_config_schema.json`
+- **Loaders**: JSON file, inline config, environment variables (deprecated)
+- **Priority**: JSON file → Inline config → Environment variables → Defaults
+
+### Key Configuration Sections
+- **core**: Essential configuration (memory, resources, initialization)
+- **network**: Protocol-specific settings (TCP, UDP, routing)
+- **hardware**: Hardware-specific configurations (InfiniBand, rings, offloads)
+- **performance**: Performance tuning parameters (polling, batching, allocation)
+- **monitor**: Logging, statistics, and monitoring settings
+
+## Quick Reference
+
+### Essential Commands
+```bash
+# Build and install
+./autogen.sh && ./configure --with-dpcp --enable-utls && make -j && make install
+
+# Run with XLIO
+LD_PRELOAD=libxlio.so ./your_application
+
+# Monitor performance
+xlio_stats --all
+
+# Check hardware
+ibstat && ibv_devinfo -l
+```
+
+### Key Files
+- `src/core/sock/sockinfo.h` - Socket abstraction base class
+- `src/core/util/sys_vars.h` - Configuration parameters
+- `src/core/config/` - Configuration system
+- `src/core/dev/ring.h` - Ring buffer abstraction
+- `src/core/event/poll_group.h` - Event management
+- `tests/unit_tests/` - Unit tests
+- `contrib/jenkins_tests/style.conf` - Code formatting rules
+
+### Key Configuration Parameters
+- **Memory**: `core.resources.memory_limit`, `core.resources.hugepages.enable`
+- **Performance**: `performance.polling.*`, `performance.ring_allocation_logic`
+- **Logging**: `monitor.log.level`, `monitor.log.file`
+- **Network**: `network.protocols.tcp.nodelay`, `network.protocols.udp.*`
+- **Hardware**: `hardware.ib.*`, `hardware.ring.*`
+
+### Development Tools
+- **xlio_stats**: Runtime statistics and performance monitoring
+- **ethtool**: Hardware capabilities verification
+- **ibstat/ibv_devinfo**: InfiniBand device information
+- **valgrind**: Memory debugging (configure with `--with-valgrind`)
+- **gdb**: Debugging (enable with `--enable-debug`)
+
+## Performance Considerations
+
+### Key Optimization Areas
+- Minimize memory allocations in data path
+- Use zero-copy techniques where possible
+- Leverage hardware offloading (TSO, LRO, GRO)
+- Consider NUMA topology for multi-socket systems
+- Use huge pages for better TLB performance
+- Choose appropriate ring allocation strategy (per-core, per-interface, per-IP)
+- Tune polling intervals and batch sizes
+
+### Common Bottlenecks
+- Insufficient buffer pool sizes
+- Suboptimal ring allocation strategy
+- Disabled hardware offloading features
+- Incorrect polling parameters
+- Memory allocation in hot paths

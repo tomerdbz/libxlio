@@ -1,0 +1,316 @@
+---
+globs: **/*.c,**/*.cpp,**/*.h,**/*.cc
+alwaysApply: false
+---
+# C++ Programming Guidelines for libxlio
+
+This guide is tailored for libxlio, a performance-critical networking library.
+
+## Basic Principles
+
+- Use English for all code and documentation.
+- Create necessary types and classes.
+- Use Doxygen style comments to document public classes and methods.
+- Follow the one-definition rule (ODR).
+- Prioritize performance without sacrificing code clarity.
+
+## Nomenclature
+
+- Use PascalCase for classes and structures.
+- Use snake_case for variables, functions, and methods.
+- Use ALL_CAPS for constants and macros.
+- Use snake_case for file and directory names.
+- Use UPPERCASE for environment variables.
+- Private/protected data members must use `m_` prefix (e.g., `m_count`, `m_buffer`).
+- Static data members must use `s_` prefix (e.g., `s_instance`).
+- Global variables must use `g_` prefix (e.g., `g_tcp_seg_pool`).
+- Avoid magic numbers and define constants.
+- Start each function with a verb.
+- Use verbs for boolean variables. Example: is_valid, has_error, can_delete, etc.
+- Precede getters with the word `get` (e.g., `get_count()`).
+- Precede setters with the word `set` (e.g., `set_count()`).
+- Use complete words instead of abbreviations and ensure correct spelling.
+  - Except for standard abbreviations like api, url, etc.
+  - Except for well-known abbreviations:
+    - i, j, k for loops
+    - err for errors
+    - ctx for contexts
+    - req, res for request/response parameters
+
+## Auto Keyword
+
+Use of `auto` should be carefully considered in performance-critical code:
+
+- **Encouraged**: For iterator declarations and inside templates where it simplifies code.
+  ```cpp
+  for (auto it = container.begin(); it != container.end(); ++it) { }
+  ```
+- **Allowed**: When the initializer is a class name and it doesn't complicate readability.
+  ```cpp
+  auto obj = MyClass();
+  ```
+- **Discouraged**: In other situations to avoid:
+  - Hiding the type of variables, complicating code understanding.
+  - Obscuring integer promotion and bit operations.
+  - Hiding whether assignment uses copy or reference semantics.
+  - Making performance implications unclear.
+- **Rationale**: Performance-critical code requires visibility into types for proper optimization and understanding of memory operations.
+
+## Formatting
+
+Follow the clang-format style defined in contrib/jenkins_tests/style.conf:
+
+- Use 4 spaces for indentation (no tabs except in Makefiles).
+- Maximum line length: 100 characters.
+- Outermost namespace blocks should not be indented.
+- Case labels align with their switch statement (not indented).
+- Function definitions: place opening brace on its own line.
+  ```cpp
+  int function()
+  {
+      // function body
+  }
+  ```
+- Other braces (classes, loops, conditionals): opening brace on same line, closing brace on its own line.
+  ```cpp
+  class MyClass {
+      // class body
+  };
+  
+  if (condition) {
+      // code
+  }
+  ```
+- Always use braces for control statements, even for single-line bodies.
+- No blank spaces at the end of a line.
+
+## Pointers and References
+
+- Place `*` and `&` by the variable name, not the type.
+  ```cpp
+  // Right:
+  int *ptr;
+  bool foo(char *str, std::vector<int> &result);
+  
+  // Wrong:
+  int* ptr;
+  bool foo(char* str, std::vector<int>& result);
+  ```
+- Use raw pointers for performance-critical paths where necessary.
+- Smart pointers (std::unique_ptr, std::shared_ptr) are acceptable for higher-level resource management.
+- Custom memory pools and allocators are preferred for frequently allocated objects.
+
+## Functions
+
+- Write focused functions with a single purpose and clear intent.
+- Keep functions readable and maintainable (avoid arbitrary instruction limits; focus on clarity).
+- Name functions with a verb and something else.
+- If it returns a boolean, use is_x or has_x, can_x, etc.
+- If it doesn't return anything (void), use execute_x or save_x, update_x, etc.
+- Avoid nesting blocks by:
+  - Early checks and returns.
+  - Extraction to utility functions.
+- Use standard library algorithms (std::for_each, std::transform, std::find, etc.) to avoid function nesting.
+- Reduce function parameters using structs or classes:
+  - Use an object to pass multiple parameters.
+  - Use an object to return multiple results.
+  - Declare necessary types for input arguments and output.
+- Use a single level of abstraction.
+
+## Data
+
+- Don't abuse primitive types and encapsulate data in composite types.
+- Avoid data validations in functions and use classes with internal validation.
+- Prefer immutability for data.
+- Use const for data that doesn't change.
+- Use constexpr for compile-time constants.
+
+## Classes
+
+- Follow SOLID principles.
+- Prefer composition over inheritance.
+- Declare interfaces as abstract classes or concepts.
+- Write small classes with a single purpose.
+  - Less than 200 instructions.
+  - Less than 10 public methods.
+  - Less than 10 properties.
+- Use the Rule of Five (or Rule of Zero) for resource management.
+- Make member variables private and provide getters/setters where necessary.
+- Use const-correctness for member functions.
+
+## Class Layout
+
+Field layout is critical for performance optimization in libxlio:
+
+- Group all fields together (either at top or bottom of class definition).
+- Group all methods together, separately from fields.
+- Do NOT mix methods and fields in the class definition.
+- Visibility modifiers don't need repetition if unchanged within a block.
+- **Rationale**: Field layout matters for padding and cache miss optimizations. Mixing fields and methods complicates visual perception and estimation of the resulting ABI.
+
+**Right:**
+```cpp
+class Foo {
+public:
+    Foo();
+    void method1();
+
+protected:
+    void method2();
+
+private:
+    void method3();
+
+public:
+    int m_field1;
+
+protected:
+    int m_field2;
+
+private:
+    int m_field3;
+};
+```
+
+**Also acceptable (no repeated visibility):**
+```cpp
+class Bar {
+public:
+    Bar();
+    void method1();
+
+private:
+    void method2();
+
+    int m_field1;
+    int m_field2;
+};
+```
+
+## Exceptions
+
+libxlio has a configurable exception handling mechanism. Follow these guidelines:
+
+- Use exceptions sparingly in performance-critical code paths.
+- Prefer error codes for expected error conditions in hot paths.
+- Use exceptions for truly exceptional situations during initialization/setup.
+- Use custom exception classes (`xlio_exception`) when exceptions are needed.
+- If you catch an exception, it should be to:
+  - Fix an expected problem.
+  - Add context with additional information.
+  - Otherwise, use a global handler.
+- **Rationale**: Exception handling overhead is inappropriate for data path operations in a performance-critical library.
+
+## Memory Management
+
+Memory management in libxlio prioritizes performance:
+
+- Use custom memory pools and allocators for performance-critical allocations.
+- Raw pointers are acceptable and often preferred in hot paths.
+- Smart pointers (std::unique_ptr, std::shared_ptr) for non-performance-critical resource management.
+- Use RAII (Resource Acquisition Is Initialization) principles where they don't impact performance.
+- Avoid memory leaks by proper resource management.
+- Consider cache alignment and padding when designing data structures.
+- Use `xlio_allocator` and related custom allocators for frequently allocated objects.
+- Prefer stack allocation over heap allocation when possible.
+
+## Performance-Critical Programming
+
+libxlio is a performance-critical library. Apply these optimizations when appropriate:
+
+- Use inline functions for hot paths where beneficial.
+- Consider cache line alignment (typically 64 bytes) for frequently accessed structures.
+- Use `likely`/`unlikely` compiler hints for branch prediction in hot paths.
+- Minimize allocations in the data path; prefer object pools and pre-allocation.
+- Prefer stack allocation over heap allocation when object lifetime allows.
+- Use `const` and `constexpr` aggressively to enable compiler optimizations.
+- Be mindful of false sharing in multi-threaded code.
+- Profile before optimizing; measure the impact of changes.
+- Document performance-critical sections and the reasoning behind optimizations.
+
+## Include Order
+
+Organize includes to minimize dependencies and reduce compile time:
+
+1. `config.h` (if applicable)
+2. Related header (for .cpp files, include the corresponding .h)
+3. C system headers (e.g., `<sys/types.h>`, `<unistd.h>`)
+4. C++ standard library headers (e.g., `<string>`, `<vector>`)
+5. Other libraries' headers (e.g., `<json-c/json.h>`)
+6. Your project's headers (e.g., `"core/util/utils.h"`)
+
+**Example:**
+```cpp
+#include "config.h"
+
+#include "foo/server/fooserver.h"
+
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <string>
+#include <vector>
+
+#include "base/basictypes.h"
+#include "foo/server/bar.h"
+```
+
+- Keep dependencies minimal to reduce compile time.
+- Use forward declarations when possible to avoid unnecessary includes.
+
+## Comments
+
+- Use Doxygen style comments to document public classes, methods, and APIs.
+  ```cpp
+  /**
+   * @brief Brief description of the function
+   * @param arg1 Description of first parameter
+   * @return Description of return value
+   */
+  int my_function(int arg1);
+  ```
+- Use C++ style (`//`) for single-line comments.
+- Use C style (`/* */`) for multi-line comments with proper alignment:
+  ```cpp
+  /* The preferred comment style for multi-line comments
+   * looks like this.
+   */
+  ```
+- Comments should explain **WHAT** your code does and **WHY**, not **HOW**.
+- Write comments as English prose with proper capitalization and punctuation.
+- Comments are important for readability and maintainability in complex, performance-critical code.
+
+## Testing
+
+- Follow the Arrange-Act-Assert convention for tests.
+- Name test variables clearly.
+- Write unit tests for each public function.
+- Follow the Given-When-Then convention.
+- All features or bug fixes **must be tested** by unit tests.
+
+## Project Structure
+
+- Use modular architecture.
+- Organize code into logical directories.
+- Use automake and autotools.
+- Separate interface (.h) from implementation (.cpp).
+- Use namespaces to organize code logically.
+
+## Standard Library
+
+- Use the C++ Standard Library when it doesn't compromise performance.
+- Use std::vector, std::map, std::unordered_map, etc. for collections (except in hot paths).
+- Use std::chrono for time-related operations.
+- Consider custom implementations for performance-critical data structures.
+
+## Concurrency
+
+libxlio is a multi-threaded library. Thread safety is critical:
+
+- Use std::thread, std::mutex, std::lock_guard for thread safety.
+- Use std::atomic for atomic operations.
+- Avoid data races by proper synchronization.
+- Use thread-safe data structures when necessary.
+- Be mindful of lock contention in hot paths.
+- Consider lock-free algorithms for performance-critical sections.
+- Document thread-safety guarantees for all public APIs.
