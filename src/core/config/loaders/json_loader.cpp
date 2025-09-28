@@ -26,11 +26,7 @@ std::map<std::string, std::experimental::any> json_loader::load_all() &
         return m_data;
     }
 
-    json_object *raw_obj = json_object_from_file(m_source.c_str());
-    if (!raw_obj) {
-        throw_xlio_exception("Failed to parse JSON file: " + m_source);
-    }
-
+    json_object *raw_obj = parse_json_file(m_source);
     json_object_handle root_obj(raw_obj);
 
     if (json_object_get_type(root_obj.get()) != json_type_object) {
@@ -62,4 +58,41 @@ void json_loader::process_json_object(const std::string &prefix, json_object *ob
             m_data[current_key] = json_utils::to_any_value(value);
         }
     }
+}
+
+json_object *json_loader::parse_json_file(const std::string &file_path)
+{
+    std::ifstream file_stream(file_path.c_str(), std::ios::in | std::ios::binary);
+    if (!file_stream.is_open()) {
+        throw_xlio_exception("Cannot open file: " + file_path);
+    }
+
+    file_stream.seekg(0, std::ios::end);
+    std::streamsize size = file_stream.tellg();
+    file_stream.seekg(0, std::ios::beg);
+
+    std::vector<char> buffer(static_cast<size_t>(size), 0);
+    if (!file_stream.read(buffer.data(), size)) {
+        throw_xlio_exception("Failed to read JSON file: " + file_path);
+    }
+
+    json_tokener *tokener = json_tokener_new_ex(JSON_TOKENER_DEFAULT_DEPTH);
+    if (!tokener) {
+        throw_xlio_exception("Failed to create JSON tokener");
+    }
+    json_tokener_set_flags(tokener, JSON_TOKENER_STRICT); // Set strict mode after creation
+    json_object *raw_obj =
+        json_tokener_parse_ex(tokener, buffer.data(), static_cast<int>(buffer.size()));
+    enum json_tokener_error tokener_err = json_tokener_get_error(tokener);
+    json_tokener_free(tokener);
+
+    if (!raw_obj) {
+        std::string error_msg = "Failed to parse JSON file: " + file_path;
+        error_msg += "\nValidate " + file_path + " with a JSON validator.";
+        error_msg += "\nJSON parse error: ";
+        error_msg += json_tokener_error_desc(tokener_err);
+        throw_xlio_exception(error_msg);
+    }
+
+    return raw_obj;
 }

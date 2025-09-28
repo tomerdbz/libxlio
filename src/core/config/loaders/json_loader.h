@@ -33,6 +33,14 @@ public:
 
 private:
     /**
+     * @brief Reads and parses a JSON file into a json_object
+     * @param file_path Path to the JSON file
+     * @return Parsed JSON object
+     * @throws xlio_exception if file cannot be read or parsed
+     */
+    static json_object *parse_json_file(const std::string &file_path);
+
+    /**
      * @brief Recursively processes a JSON object
      * @param prefix Key prefix for nested values
      * @param obj JSON object to process

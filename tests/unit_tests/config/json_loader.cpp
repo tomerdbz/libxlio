@@ -414,3 +414,157 @@ TEST(config, json_loader_empty_array)
         std::experimental::any_cast<std::vector<std::experimental::any>>(data["test.empty_array"]);
     ASSERT_TRUE(empty_array.empty());
 }
+
+TEST(config, json_loader_parse_json_file_valid)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log"
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    std::map<std::string, std::experimental::any> data = loader.load_all();
+
+    ASSERT_EQ(2, std::experimental::any_cast<int64_t>(data["core.log.level"]));
+    ASSERT_EQ("/var/log/xlio.log",
+              std::experimental::any_cast<std::string>(data["core.log.file_path"]));
+}
+
+TEST(config, json_loader_strict_mode_trailing_comma)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log",
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+TEST(config, json_loader_strict_mode_extra_comma_after_last_property)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log"
+            },
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+TEST(config, json_loader_strict_mode_single_quotes_instead_of_double)
+{
+    conf_file_writer json_config(R"({
+        'core': {
+            'log': {
+                'level': 2,
+                'file_path': '/var/log/xlio.log'
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+// Test strict JSON parsing - should reject JSON with single quotes for keys
+TEST(config, json_loader_strict_mode_single_quotes_for_keys)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            'log': {
+                "level": 2,
+                "file_path": "/var/log/xlio.log"
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+// Test strict JSON parsing - should reject JSON with invalid boolean capitalization
+TEST(config, json_loader_strict_mode_invalid_boolean_capitalized)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log",
+                "enabled": True
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+// Test strict JSON parsing - should reject JSON with invalid boolean capitalization (False)
+TEST(config, json_loader_strict_mode_invalid_boolean_capitalized_false)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log",
+                "enabled": False
+            }
+        }
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+TEST(config, json_loader_strict_mode_comments)
+{
+    conf_file_writer json_config(R"({
+        "core": {
+            "log": {
+                "level": 2,
+                "file_path": "/var/log/xlio.log"
+            }
+        }
+        // This comment should be rejected in strict mode
+    })");
+
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+TEST(config, json_loader_empty_file)
+{
+    conf_file_writer json_config("");
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
+
+TEST(config, json_loader_deep_nesting)
+{
+    std::string deep_json = R"({"a":)";
+    for (int i = 0; i < 100; ++i) {
+        deep_json += R"({"b":)";
+    }
+    deep_json += R"("value")";
+    for (int i = 0; i < 100; ++i) {
+        deep_json += "}";
+    }
+    deep_json += "}";
+
+    conf_file_writer json_config(deep_json.c_str());
+    json_loader loader(json_config.get());
+    ASSERT_THROW(loader.load_all(), xlio_exception);
+}
