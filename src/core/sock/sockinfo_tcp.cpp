@@ -5415,9 +5415,6 @@ bool sockinfo_tcp::poll_and_progress_rx(uint64_t &poll_sn)
     // In this case it will be better to have a lock() version of poll_and_process_element_rx.
     // And then we should continue polling untill we have ready packets or we drained the CQ.
     bool all_drained = true;
-    if (likely(m_p_rx_ring)) {
-        all_drained = m_p_rx_ring->poll_and_process_element_rx(&poll_sn);
-    } else { // There's more than one CQ, go over each one
         rx_ring_map_t::iterator rx_ring_iter;
         for (rx_ring_iter = m_rx_ring_map.begin(); rx_ring_iter != m_rx_ring_map.end();
              rx_ring_iter++) {
@@ -5428,7 +5425,7 @@ bool sockinfo_tcp::poll_and_progress_rx(uint64_t &poll_sn)
 
             all_drained &= rx_ring_iter->first->poll_and_process_element_rx(&poll_sn);
         }
-    }
+
 
     return all_drained;
 }
