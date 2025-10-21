@@ -7,7 +7,7 @@
   "triggerOnUpdates": true,
   "shouldUpdateDescription": false,
   "statusCheck": true,
-  "includeBranches": ["master", "vNext"],
+  "includeBranches": ["master", "vNext", "4480494_cursorrules"],
   "excludeBranches": ["draft", "wip", "temp"],
   "labels": ["ready-for-review"],
   "disabledLabels": ["wip", "draft", "do-not-review"],
