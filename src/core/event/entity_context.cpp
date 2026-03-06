@@ -32,14 +32,20 @@
  * SOFTWARE.
  */
 
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include "entity_context.h"
 #include "vlogger/vlogger.h"
+#include "dev/ring.h"
+#include "sock/fd_collection.h"
 #include "sock/sockinfo_tcp.h"
 #include "sock/sock-redirect.h"
 
 using namespace std::chrono;
 
-#define MODULE_NAME "worker_thread"
+#define MODULE_NAME "entity_context"
 
 #define ctx_logpanic __log_panic
 #define ctx_logerr   __log_err
@@ -58,14 +64,40 @@ entity_context::entity_context(size_t index)
 
     get_event_handler()->do_tasks(); // Update last_taken_time
 
-    ctx_logdbg("Entity Context created");
+    m_wakeup_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (m_wakeup_fd < 0) {
+        ctx_logerr("Failed to create wakeup eventfd (errno=%d %m)", errno);
+    }
+
+    m_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (m_epoll_fd < 0) {
+        ctx_logerr("Failed to create interrupt epoll fd (errno=%d %m)", errno);
+    }
+
+    if (m_epoll_fd >= 0 && m_wakeup_fd >= 0) {
+        struct epoll_event ev = {};
+        ev.events = EPOLLIN;
+        ev.data.fd = m_wakeup_fd;
+        if (epoll_ctl(m_epoll_fd, EPOLL_CTL_ADD, m_wakeup_fd, &ev) < 0) {
+            ctx_logerr("Failed to add wakeup fd to epoll (errno=%d %m)", errno);
+        }
+    }
+
+    ctx_logdbg("Entity Context created (%p)", this);
 }
 
 entity_context::~entity_context()
 {
     xlio_stats_instance_remove_ent_ctx_block(&m_stats);
 
-    ctx_logdbg("Entity Context destroyed");
+    if (m_epoll_fd >= 0) {
+        close(m_epoll_fd);
+    }
+    if (m_wakeup_fd >= 0) {
+        close(m_wakeup_fd);
+    }
+
+    ctx_logdbg("Entity Context destroyed (%p)", this);
 }
 
 void entity_context::process()
@@ -117,6 +149,13 @@ void entity_context::process()
 void entity_context::add_job(const job_desc &job)
 {
     m_job_queue.insert_job(job);
+
+    // TODO: performance concern. Avoids reordering and lost wakeup in wait_for_interrupt().
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    if (m_sleeping.load(std::memory_order_acquire)) {
+        wakeup();
+    }
 }
 
 void entity_context::connect_socket_job(const job_desc &job)
@@ -217,6 +256,104 @@ void entity_context::close_socket_job(const job_desc &job)
     }
 }
 
+void entity_context::arm_cq_notifications()
+{
+    for (ring *rng : get_rings()) {
+        bool success = rng->request_notification(CQT_RX);
+        if (unlikely(!success)) {
+            ctx_logerr("Failed to arm CQ notification for ring %p", rng);
+        }
+    }
+}
+
+void entity_context::drain_wakeup_fd()
+{
+    uint64_t val;
+    int ret = read(m_wakeup_fd, &val, sizeof(val));
+    if (unlikely(ret < 0 && errno != EAGAIN)) {
+        ctx_logerr("Failed to read from wakeup fd (errno=%d %m)", errno);
+    }
+}
+
+entity_context::wakeup_reason entity_context::wait_for_interrupt(int timeout_ms)
+{
+    wakeup_reason reason = WAKEUP_NONE;
+
+    if (m_epoll_fd < 0 || m_wakeup_fd < 0) {
+        return WAKEUP_NONE;
+    }
+
+    arm_cq_notifications();
+
+    // Race avoidance: re-poll CQ after arming.
+    if (poll()) {
+        return WAKEUP_CQ_EVENT;
+    }
+
+    m_sleeping.store(true, std::memory_order_release);
+
+    // Final re-check after setting sleeping flag. An app thread that inserted
+    // a job between our has_pending() check and the store above will either:
+    // (a) have its job visible if we re-check now, or
+    // (b) see m_sleeping==true and write to wakeup_fd.
+    if (m_job_queue.has_pending()) {
+        m_sleeping.store(false, std::memory_order_release);
+        return WAKEUP_JOB_POSTED;
+    }
+
+    static constexpr int MAX_EVENTS = 8;
+    struct epoll_event events[MAX_EVENTS];
+    int nfds;
+
+    do {
+        nfds = SYSCALL(epoll_wait, m_epoll_fd, events, MAX_EVENTS, timeout_ms);
+    } while (nfds == -1 && errno == EINTR && !g_b_exit);
+
+    // TODO: handle EINTR and g_b_exit.
+
+    if (unlikely(nfds == -1)) {
+        ctx_logerr("Failed to wait for epoll events (errno=%d %m)", errno);
+        return WAKEUP_NONE;
+    }
+
+    m_sleeping.store(false, std::memory_order_release);
+
+    if (nfds == 0) {
+        return WAKEUP_TIMEOUT;
+    }
+
+    for (int i = 0; i < nfds; ++i) {
+        if (events[i].data.fd == m_wakeup_fd) {
+            drain_wakeup_fd();
+            if (reason == WAKEUP_NONE) {
+                reason = WAKEUP_JOB_POSTED;
+            }
+        } else {
+            cq_channel_info *p_cq_ch_info =
+                g_p_fd_collection ? g_p_fd_collection->get_cq_channel_fd(events[i].data.fd)
+                                 : nullptr;
+            if (p_cq_ch_info) {
+                ring *p_ring = p_cq_ch_info->get_ring();
+                p_ring->ack_cq_events();
+            }
+            // CQ event has higher priority than job posted.
+            reason = WAKEUP_CQ_EVENT;
+        }
+    }
+
+    return reason;
+}
+
+void entity_context::wakeup()
+{
+    if (m_wakeup_fd >= 0) {
+        const uint64_t val = 1;
+        if (write(m_wakeup_fd, &val, sizeof(val)) < 0 && errno != EAGAIN) {
+            ctx_logerr("Failed to write to wakeup fd (errno=%d %m)", errno);
+        }
+    }
+}
+
 /*static*/
 void entity_context::entity_context_comp_cb(xlio_socket_t sock, uintptr_t userdata_sq,
                                             uintptr_t userdata_op)
@@ -231,5 +368,19 @@ void entity_context::entity_context_comp_cb(xlio_socket_t sock, uintptr_t userda
         --buf->lwip_pbuf.ref;
     } else {
         buf->p_desc_owner->mem_buf_tx_release(buf, true);
+    }
+}
+
+void entity_context::notify_ring_added(ring *rng)
+{
+    size_t num_fds = 0;
+    int *fds = rng->get_rx_channel_fds(num_fds);
+    for (size_t i = 0; i < num_fds; ++i) {
+        struct epoll_event ev = {};
+        ev.events = EPOLLIN;
+        ev.data.fd = fds[i];
+        if (epoll_ctl(m_epoll_fd, EPOLL_CTL_ADD, fds[i], &ev) < 0 && errno != EEXIST) {
+            ctx_logerr("Failed to add CQ channel fd %d to epoll (errno=%d %m)", fds[i], errno);
+        }
     }
 }

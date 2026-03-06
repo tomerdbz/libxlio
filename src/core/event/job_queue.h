@@ -49,6 +49,8 @@ public:
 
     queue_type &get_all();
 
+    bool has_pending() const;
+
 private:
     queue_type m_queue_insert;
     queue_type m_queue_fetch;
@@ -80,6 +82,12 @@ template <typename T> typename job_queue<T>::queue_type &job_queue<T>::get_all()
     std::lock_guard<decltype(m_queue_lock)> lock(m_queue_lock);
     m_queue_insert.swap(m_queue_fetch);
     return m_queue_fetch;
+}
+
+template <typename T> bool job_queue<T>::has_pending() const
+{
+    std::atomic_thread_fence(std::memory_order::memory_order_acquire);
+    return m_queue_insert.size() > 0U;
 }
 
 #endif // JOB_QUEUE_H
