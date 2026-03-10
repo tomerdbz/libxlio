@@ -858,4 +858,5 @@ void epfd_info_entity_context_events::move_epoll_ready_events(ep_ready_fd_list_t
 
         si = m_epoll_ready_sockets.next(si);
     }
+    m_epoll_ready_sockets.clear();
 }
