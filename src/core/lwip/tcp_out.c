@@ -1504,7 +1504,12 @@ static err_t tcp_output_segment(struct tcp_seg *seg, struct tcp_pcb *pcb)
 
     u16_t flags = 0;
     flags |= seg->flags & TF_SEG_OPTS_TSO;
-    flags |= (TCP_SEQ_LT(seg->seqno, pcb->snd_nxt) ? TCP_WRITE_REXMIT : 0);
+    if (TCP_SEQ_LT(seg->seqno, pcb->snd_nxt)) {
+        flags |= TCP_WRITE_REXMIT;
+        if (pcb->rexmit_reason == REXMIT_REASON_RTO) {
+            flags |= TCP_WRITE_REXMIT_RTO;
+        }
+    }
     flags |= seg->flags & TF_SEG_OPTS_ZEROCOPY;
 
     return pcb->ip_output(p, seg, pcb, flags);
@@ -1622,6 +1627,7 @@ void tcp_rexmit_rto(struct tcp_pcb *pcb)
 
     /* Do the actual retransmission */
     tcp_output(pcb);
+    pcb->rexmit_reason = REXMIT_REASON_NONE;
 }
 
 /**
@@ -1678,6 +1684,7 @@ void tcp_rexmit_fast(struct tcp_pcb *pcb)
         LWIP_DEBUGF(TCP_FR_DEBUG,
                     ("tcp_receive: dupacks %" U16_F " (%" U32_F "), fast retransmit %" U32_F "\n",
                      (u16_t)pcb->dupacks, pcb->lastack, pcb->unacked->seqno));
+        pcb->rexmit_reason = REXMIT_REASON_FAST;
         tcp_rexmit(pcb);
 #if TCP_CC_ALGO_MOD
         cc_cong_signal(pcb, CC_NDUPACK);

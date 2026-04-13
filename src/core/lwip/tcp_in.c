@@ -249,6 +249,7 @@ void L3_level_tcp_input(struct pbuf *p, struct tcp_pcb *pcb)
                     pcb->is_in_input = 0;
                     /* Try to send something out. */
                     tcp_output(pcb);
+                    pcb->rexmit_reason = REXMIT_REASON_NONE;
                 }
             }
             /* Jump target if pcb has been aborted in a callback (by calling tcp_abort()).

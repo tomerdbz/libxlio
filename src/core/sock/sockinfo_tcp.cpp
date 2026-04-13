@@ -1764,7 +1764,37 @@ send_iov:
     }
 
     if (unlikely(p_si_tcp->m_p_socket_stats && is_set(attr.flags, XLIO_TX_PACKET_REXMIT) && rc)) {
-        p_si_tcp->m_p_socket_stats->counters.n_tx_retransmits++;
+        socket_counters_t &ctrs = p_si_tcp->m_p_socket_stats->counters;
+        struct tcp_pcb *pcb = reinterpret_cast<struct tcp_pcb *>(v_p_conn);
+        ctrs.n_tx_retransmits++;
+        if (is_set(attr.flags, XLIO_TX_PACKET_REXMIT_RTO)) {
+            ctrs.n_tx_retransmits_rto++;
+            s16_t rto_val = pcb->rto_at_rexmit;
+            if (rto_val <= 1) {
+                ctrs.n_tx_rto_with_min_rto++;
+            }
+            ctrs.n_tx_rto_sum_rto_value += (uint32_t)rto_val;
+            if ((uint16_t)rto_val > ctrs.n_tx_rto_max_rto_value) {
+                ctrs.n_tx_rto_max_rto_value = (uint16_t)rto_val;
+            }
+            if (ctrs.n_tx_rto_min_rto_value == 0 || (uint16_t)rto_val < ctrs.n_tx_rto_min_rto_value) {
+                ctrs.n_tx_rto_min_rto_value = (uint16_t)rto_val;
+            }
+            enum tcp_state st = get_tcp_state(pcb);
+            if (st == SYN_SENT || st == SYN_RCVD) {
+                ctrs.n_tx_rto_in_syn++;
+            } else if (st == ESTABLISHED) {
+                ctrs.n_tx_rto_in_established++;
+            } else {
+                ctrs.n_tx_rto_in_other++;
+            }
+            s16_t overshoot = pcb->rtime_at_rexmit - rto_val;
+            if (overshoot > 0) {
+                ctrs.n_tx_rto_sum_rtime_minus_rto += (uint32_t)overshoot;
+            }
+        } else {
+            ctrs.n_tx_retransmits_fast++;
+        }
     }
 
     return (ret >= 0 ? ERR_OK : ERR_WOULDBLOCK);

@@ -74,6 +74,16 @@ struct aggregated_socket_stats {
     uint64_t total_tx_errors = 0;
     uint64_t total_rx_errors = 0;
     uint64_t total_tx_retransmits = 0;
+    uint64_t total_tx_retransmits_rto = 0;
+    uint64_t total_tx_retransmits_fast = 0;
+    uint64_t total_rto_with_min_rto = 0;
+    uint64_t total_rto_sum_overshoot = 0;
+    uint64_t total_rto_sum_rto_value = 0;
+    uint16_t rto_max_value = 0;
+    uint16_t rto_min_value = 0xFFFF;
+    uint64_t total_rto_in_syn = 0;
+    uint64_t total_rto_in_established = 0;
+    uint64_t total_rto_in_other = 0;
     uint64_t total_rx_os_packets = 0, total_tx_os_packets = 0;
     uint64_t total_poll_hit = 0, total_poll_miss = 0;
 
@@ -151,6 +161,20 @@ static aggregated_socket_stats aggregate_socket_stats()
         agg.total_tx_errors += c.n_tx_errors;
         agg.total_rx_errors += c.n_rx_errors;
         agg.total_tx_retransmits += c.n_tx_retransmits;
+        agg.total_tx_retransmits_rto += c.n_tx_retransmits_rto;
+        agg.total_tx_retransmits_fast += c.n_tx_retransmits_fast;
+        agg.total_rto_with_min_rto += c.n_tx_rto_with_min_rto;
+        agg.total_rto_sum_overshoot += c.n_tx_rto_sum_rtime_minus_rto;
+        agg.total_rto_sum_rto_value += c.n_tx_rto_sum_rto_value;
+        if (c.n_tx_rto_max_rto_value > agg.rto_max_value) {
+            agg.rto_max_value = c.n_tx_rto_max_rto_value;
+        }
+        if (c.n_tx_rto_min_rto_value > 0 && c.n_tx_rto_min_rto_value < agg.rto_min_value) {
+            agg.rto_min_value = c.n_tx_rto_min_rto_value;
+        }
+        agg.total_rto_in_syn += c.n_tx_rto_in_syn;
+        agg.total_rto_in_established += c.n_tx_rto_in_established;
+        agg.total_rto_in_other += c.n_tx_rto_in_other;
         agg.total_rx_os_packets += c.n_rx_os_packets;
         agg.total_tx_os_packets += c.n_tx_os_packets;
         agg.total_poll_hit += c.n_rx_poll_hit;
@@ -783,6 +807,34 @@ static void write_runtime_stats(FILE *f, const aggregated_socket_stats &agg, dou
                     "tx_retransmits: %" PRIu64
                     " # WARNING: TCP retransmits (congestion or packet loss)\n",
                     agg.total_tx_retransmits);
+            fprintf(f, "tx_retransmits_rto: %" PRIu64 "\n", agg.total_tx_retransmits_rto);
+            fprintf(f, "tx_retransmits_fast: %" PRIu64 "\n", agg.total_tx_retransmits_fast);
+            if (agg.total_tx_retransmits_rto > 0) {
+                unsigned tick_ms = safe_mce_sys().tcp_timer_resolution_msec * 2;
+                double avg_rto = (double)agg.total_rto_sum_rto_value /
+                    (double)agg.total_tx_retransmits_rto;
+                fprintf(f, "rto_avg_value: %.1f ticks (%.0f ms) # avg rto at timeout\n",
+                        avg_rto, avg_rto * tick_ms);
+                if (agg.rto_min_value != 0xFFFF) {
+                    fprintf(f, "rto_range: %u-%u ticks (%u-%u ms)\n",
+                            agg.rto_min_value, agg.rto_max_value,
+                            agg.rto_min_value * tick_ms, agg.rto_max_value * tick_ms);
+                }
+                fprintf(f, "rto_at_min_timeout: %" PRIu64 " # RTOs where rto was 1 tick (%u ms)\n",
+                        agg.total_rto_with_min_rto, tick_ms);
+                double avg_overshoot = (double)agg.total_rto_sum_overshoot /
+                    (double)agg.total_tx_retransmits_rto;
+                fprintf(f, "rto_avg_timer_overshoot: %.1f ticks # avg (rtime - rto) at RTO\n",
+                        avg_overshoot);
+                fprintf(f, "rto_in_syn_state: %" PRIu64 " # RTOs during connection setup\n",
+                        agg.total_rto_in_syn);
+                fprintf(f, "rto_in_established: %" PRIu64 " # RTOs during data transfer\n",
+                        agg.total_rto_in_established);
+                if (agg.total_rto_in_other > 0) {
+                    fprintf(f, "rto_in_other_state: %" PRIu64 " # RTOs in closing/other states\n",
+                            agg.total_rto_in_other);
+                }
+            }
         } else {
             fprintf(f, "tx_retransmits: 0\n");
         }

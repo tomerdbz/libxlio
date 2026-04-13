@@ -139,6 +139,16 @@ typedef struct {
     uint32_t n_tx_errors;
     uint32_t n_tx_eagain;
     uint32_t n_tx_retransmits;
+    uint32_t n_tx_retransmits_rto;
+    uint32_t n_tx_retransmits_fast;
+    uint32_t n_tx_rto_with_min_rto; /* RTO retransmits where rto was at minimum (1 tick) */
+    uint32_t n_tx_rto_sum_rtime_minus_rto; /* sum of (rtime - rto) overshoot across all RTOs */
+    uint32_t n_tx_rto_sum_rto_value; /* sum of rto values at retransmit (for avg computation) */
+    uint16_t n_tx_rto_max_rto_value; /* max rto value seen at retransmit */
+    uint16_t n_tx_rto_min_rto_value; /* min rto value seen at retransmit (init 0xFFFF) */
+    uint32_t n_tx_rto_in_syn; /* RTO retransmits in SYN_SENT or SYN_RCVD state */
+    uint32_t n_tx_rto_in_established; /* RTO retransmits in ESTABLISHED state */
+    uint32_t n_tx_rto_in_other; /* RTO retransmits in closing/other states */
     uint32_t n_tx_os_packets;
     uint32_t n_tx_os_errors;
     uint32_t n_tx_os_eagain;

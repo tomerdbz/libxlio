@@ -298,6 +298,9 @@ struct tcp_pcb {
 
     s16_t rto; /* retransmission time-out */
     u8_t nrtx; /* number of retransmissions */
+    u8_t rexmit_reason; /* reason for current retransmit batch (REXMIT_REASON_*) */
+    s16_t rto_at_rexmit; /* rto value when RTO fired (diagnostic) */
+    s16_t rtime_at_rexmit; /* rtime value when RTO fired (diagnostic) */
 
     /* fast retransmit/recovery */
     u32_t lastack; /* Highest acknowledged seqno. */
@@ -435,10 +438,16 @@ err_t tcp_close(struct tcp_pcb *pcb);
 err_t tcp_shutdown(struct tcp_pcb *pcb, int shut_rx, int shut_tx);
 
 /* Flags for "apiflags" parameter in tcp_write */
-#define TCP_WRITE_REXMIT   0x08
-#define TCP_WRITE_TSO      0x20
-#define TCP_WRITE_FILE     0x40
-#define TCP_WRITE_ZEROCOPY 0x80
+#define TCP_WRITE_REXMIT       0x08
+#define TCP_WRITE_REXMIT_RTO   0x10 /* RTO-triggered retransmit (vs fast retransmit) */
+#define TCP_WRITE_TSO          0x20
+#define TCP_WRITE_FILE         0x40
+#define TCP_WRITE_ZEROCOPY     0x80
+
+/* Values for tcp_pcb::rexmit_reason */
+#define REXMIT_REASON_NONE 0
+#define REXMIT_REASON_RTO  1
+#define REXMIT_REASON_FAST 2
 
 err_t tcp_write(struct tcp_pcb *pcb, const void *dataptr, u32_t len, u16_t apiflags,
                 pbuf_desc *desc);
