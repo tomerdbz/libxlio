@@ -94,6 +94,10 @@ unit_tests_SOURCES = \
 	config/parameter_descriptor.cpp \
 	config/schema_analyzer.cpp \
 	job_queue/job_queue_test.cpp \
+	lwip/tcp_output_test.cpp \
+	lwip/tcp_in_timewait_test.cpp \
+	$(top_srcdir)/src/core/lwip/tcp_out.c \
+	$(top_srcdir)/src/core/lwip/tcp_in.c \
     $(top_builddir)/src/core/config/loaders/inline_loader.cpp \
 	$(top_builddir)/src/core/config/loaders/json_loader.cpp \
 	$(top_builddir)/src/core/config/loaders/key_resolver.cpp \
@@ -110,4 +114,3 @@ unit_tests_SOURCES = \
 
 unit_tests_DEPENDENCIES = \
 	libgtest.la
-

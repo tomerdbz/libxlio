@@ -73,6 +73,7 @@ gtest_CPPFLAGS = \
 	-I$(top_srcdir)/src/core \
 	-I$(top_srcdir)/tests/gtest \
 	-I$(top_srcdir)/tests/gtest/googletest/include \
+	$(LIBNL_CFLAGS) \
 	$(AM_CPPFLAGS)
 
 gtest_LDFLAGS = -no-install
@@ -123,6 +124,16 @@ gtest_SOURCES = \
 	core/xlio_base.cc \
 	core/xlio_sockopt.cc \
 	core/blocking_wait_test.cc \
+	core/worker_socket_lifetime_test.cc \
+	core/worker_socket_state_test.cc \
+	core/worker_rx_close_barrier_test.cc \
+	core/worker_rx_ready_metadata_test.cc \
+	core/worker_shutdown_result_test.cc \
+	core/fd_socket_slot_test.cc \
+	core/epoll_offloaded_registry_test.cc \
+	core/job_queue_test.cc \
+	core/listen_close_barrier_test.cc \
+	core/listen_child_batch_test.cc \
 	core/blocking_wait_results_test.cc \
 	\
 	xliod/xliod_base.cc \
@@ -172,4 +183,3 @@ CLEANFILES = hash.c
 
 hash.c:
 	@echo "#include \"$(top_builddir)/tools/daemon/$@\"" >$@
-

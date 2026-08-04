@@ -64,7 +64,15 @@ public:
     int block(int timeout_ms)
     {
         struct epoll_event evs[4];
-        return ::epoll_wait(m_epfd, evs, 4, timeout_ms);
+        m_woken_by_watched_fd = false;
+        const int count = ::epoll_wait(m_epfd, evs, 4, timeout_ms);
+
+        for (int index = 0; index < count; ++index) {
+            if (evs[index].data.fd == m_watched_fd) {
+                m_woken_by_watched_fd = true;
+            }
+        }
+        return count;
     }
 
     void disarm()
@@ -86,10 +94,80 @@ public:
         ::epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_pipe[0], &ev);
     }
 
+    bool watch_fd(int fd)
+    {
+        struct epoll_event ev = {};
+
+        ev.events = EPOLLIN;
+        ev.data.fd = fd;
+        m_watched_fd = fd;
+        return ::epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &ev) == 0;
+    }
+
+    bool was_woken_by_watched_fd() const { return m_woken_by_watched_fd; }
+
 private:
     int m_epfd = -1;
     int m_pipe[2] = {-1, -1};
+    int m_watched_fd = -1;
     bool m_armed = false;
+    bool m_woken_by_watched_fd = false;
+};
+
+class tracking_lock {
+public:
+    void lock() { m_owned = true; }
+    void unlock() { m_owned = false; }
+    bool owns_lock() const { return m_owned; }
+
+private:
+    bool m_owned = false;
+};
+
+struct block_exception {
+    explicit block_exception(int value)
+        : token(value)
+    {
+    }
+
+    int token;
+};
+
+class throwing_waiter {
+public:
+    throwing_waiter(tracking_lock &lock, int exception_token)
+        : m_lock(lock)
+        , m_exception_token(exception_token)
+    {
+    }
+
+    void arm() { m_armed = true; }
+
+    int block(int)
+    {
+        m_block_saw_unlocked = !m_lock.owns_lock();
+        throw block_exception(m_exception_token);
+    }
+
+    void disarm()
+    {
+        ++m_disarm_calls;
+        m_disarm_saw_lock = m_lock.owns_lock();
+        m_armed = false;
+    }
+
+    bool is_armed() const { return m_armed; }
+    bool block_saw_unlocked() const { return m_block_saw_unlocked; }
+    bool disarm_saw_lock() const { return m_disarm_saw_lock; }
+    int disarm_calls() const { return m_disarm_calls; }
+
+private:
+    tracking_lock &m_lock;
+    int m_exception_token;
+    int m_disarm_calls = 0;
+    bool m_armed = false;
+    bool m_block_saw_unlocked = false;
+    bool m_disarm_saw_lock = false;
 };
 
 // Production waiter: one wakeup_pipe + one m_rx_epfd + m_is_sleeping. Pipe byte stays unread.
@@ -204,7 +282,8 @@ TEST(blocking_wait, ready_without_sleep_when_condition_true)
     bool ready = true;
 
     lock.lock();
-    blocking_wait::result r = blocking_wait::wait_until(lock, w, [&] { return ready; }, 1000);
+    blocking_wait::result r = blocking_wait::wait_until(
+        lock, w, [&] { return ready; }, 1000);
     lock.unlock();
 
     EXPECT_EQ(blocking_wait::result::READY, r);
@@ -218,7 +297,8 @@ TEST(blocking_wait, timeout_when_condition_stays_false)
 
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     lock.lock();
-    blocking_wait::result r = blocking_wait::wait_until(lock, w, [&] { return ready; }, 100);
+    blocking_wait::result r = blocking_wait::wait_until(
+        lock, w, [&] { return ready; }, 100);
     lock.unlock();
     long took = elapsed_ms(start);
 
@@ -242,7 +322,8 @@ TEST(blocking_wait, worker_wakes_sleeping_app)
 
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     lock.lock();
-    blocking_wait::result r = blocking_wait::wait_until(lock, w, [&] { return ready; }, 5000);
+    blocking_wait::result r = blocking_wait::wait_until(
+        lock, w, [&] { return ready; }, 5000);
     lock.unlock();
     long took = elapsed_ms(start);
 
@@ -251,6 +332,34 @@ TEST(blocking_wait, worker_wakes_sleeping_app)
     EXPECT_EQ(blocking_wait::result::READY, r);
     // Lost wakeup would land near the 5s timeout, not ~100ms after notify.
     EXPECT_LT(took, 2000);
+}
+
+// Shadow-listener readiness must be pred, not a spurious wake.
+TEST(blocking_wait, watched_external_fd_returns_control)
+{
+    test_waiter w;
+    std::mutex lock;
+    int external_pipe[2] = {-1, -1};
+
+    ASSERT_EQ(0, ::pipe(external_pipe));
+    ASSERT_TRUE(w.watch_fd(external_pipe[0]));
+
+    std::thread producer([&] {
+        std::this_thread::sleep_for(ms(100));
+        const ssize_t written = ::write(external_pipe[1], "x", 1);
+        (void)written;
+    });
+
+    lock.lock();
+    const blocking_wait::result r = blocking_wait::wait_until(
+        lock, w, [&] { return w.was_woken_by_watched_fd(); }, 2000);
+    lock.unlock();
+
+    producer.join();
+    EXPECT_EQ(blocking_wait::result::READY, r);
+    EXPECT_TRUE(w.was_woken_by_watched_fd());
+    ::close(external_pipe[0]);
+    ::close(external_pipe[1]);
 }
 
 TEST(blocking_wait, no_lost_wakeup_when_signaled_in_check_sleep_window)
@@ -341,6 +450,54 @@ TEST(blocking_wait, timeout_spanning_multiple_slices_honors_user_deadline)
     // Full user deadline, not the first/second slice at ~100/~200ms.
     EXPECT_GE(took, user_timeout_ms - 10);
     EXPECT_LT(took, 5000);
+}
+
+TEST(blocking_wait, block_exception_restores_lock_and_disarms_waiter)
+{
+    tracking_lock lock;
+    throwing_waiter waiter(lock, 17);
+
+    lock.lock();
+    try {
+        (void)blocking_wait::wait_until(
+            lock, waiter, [] { return false; }, -1);
+        FAIL() << "Waiter::block exception was swallowed";
+    } catch (...) {
+    }
+
+    EXPECT_TRUE(waiter.block_saw_unlocked());
+    EXPECT_TRUE(lock.owns_lock());
+    EXPECT_TRUE(waiter.disarm_saw_lock());
+    EXPECT_FALSE(waiter.is_armed());
+    EXPECT_EQ(1, waiter.disarm_calls());
+    if (lock.owns_lock()) {
+        lock.unlock();
+    }
+}
+
+TEST(blocking_wait, block_exception_is_rethrown_unchanged)
+{
+    static const int expected_token = 0x51a7;
+    tracking_lock lock;
+    throwing_waiter waiter(lock, expected_token);
+    bool caught_expected_exception = false;
+
+    lock.lock();
+    try {
+        (void)blocking_wait::wait_until(
+            lock, waiter, [] { return false; }, -1);
+        FAIL() << "Waiter::block exception was swallowed";
+    } catch (const block_exception &exception) {
+        caught_expected_exception = true;
+        EXPECT_EQ(expected_token, exception.token);
+    } catch (...) {
+        FAIL() << "Waiter::block exception type was changed";
+    }
+
+    EXPECT_TRUE(caught_expected_exception);
+    if (lock.owns_lock()) {
+        lock.unlock();
+    }
 }
 
 // N>=2 waiters, notify matches no pred. Skip-DEL while count!=0 turns block() into a hot loop.
