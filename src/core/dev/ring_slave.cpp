@@ -291,6 +291,19 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
             flow_tag_id = FLOW_TAG_MASK;
         }
 
+        sockinfo_tcp *tcp_sink = dynamic_cast<sockinfo_tcp *>(sink);
+        if (tcp_sink && tcp_sink->is_worker_posix_managed() && flow_tag_id != 0U &&
+            flow_tag_id != FLOW_TAG_MASK) {
+            // Worker-managed sockets install their steering rules untagged. Without a
+            // tag every packet of such a flow takes the canonical tuple-parsing lane,
+            // so a stale CQE observed after socket close/fd reuse can never resolve
+            // through the legacy tag-to-fd fast path to the wrong socket. Demote before
+            // the rfs map lookup so the create and the reuse branch see the same untagged
+            // id - one enforcement point, and the post-attach set_flow_tag()/registration
+            // log stay silent on the reuse path too.
+            flow_tag_id = 0U;
+        }
+
         auto itr = m_flow_tcp_map.find(rfs_key);
         if (itr == end(m_flow_tcp_map)) {
             // It means that no rfs object exists so I need to create a new one and insert it to
@@ -308,10 +321,9 @@ bool steering_handler<KEY4T, KEY2T, HDR>::attach_flow(flow_tuple &flow_spec_5t, 
                     new rfs_rule_filter(m_ring.m_tcp_dst_port_attach_map, rule_key, tcp_3t_only);
             }
             try {
-                sockinfo_tcp *tcp_si = dynamic_cast<sockinfo_tcp *>(sink);
                 int steering_index = -1;
-                if (tcp_si && tcp_si->get_listen_context()) {
-                    steering_index = tcp_si->get_listen_context()->get_steering_index();
+                if (tcp_sink && tcp_sink->get_listen_context()) {
+                    steering_index = tcp_sink->get_listen_context()->get_steering_index();
                 }
 
                 if (safe_mce_sys().gro_streams_max) {
