@@ -1,0 +1,169 @@
+XLIO extra-API tests
+====================
+
+blocking_socket_workers_e2e
+---------------------------
+
+This two-host POSIX-socket harness validates blocking accept, receive, send, shutdown, and close behavior in worker-threads mode.
+It is linked without libxlio and uses LD_PRELOAD for XLIO runs.
+
+Configure the source tree normally, then build the harness through its project target:
+
+    make -C tests/extra_api blocking_socket_workers_e2e
+
+Run one server and one client process on two hosts with identical XLIO configuration; the generic preload form is:
+
+    LD_PRELOAD=<path to libxlio.so> XLIO_WORKER_THREADS=N XLIO_SELECT_POLL=M \
+        ./blocking_socket_workers_e2e server --bind <server IP> [--port PORT] [--case NAME]
+
+    LD_PRELOAD=<path to libxlio.so> XLIO_WORKER_THREADS=N XLIO_SELECT_POLL=M \
+        ./blocking_socket_workers_e2e client --bind <client IP> --server <server IP> [--port PORT] [--case NAME]
+
+The `recv-close-fence-order` and `recv-close-copy` hook cases additionally require an `--enable-debug` (`-D_DEBUG`) libxlio preload; the harness probes the loaded image for the debug worker-control hook and fails fast naming that build-flavor precondition when it is absent or unprobeable.
+
+Run the server and client first with R2C (run-to-completion, the default single-threaded XLIO polling mode) / default XLIO using `performance.threading.worker_threads=0`.
+Run the same command and environment with worker mode enabled, changing only the worker-thread configuration.
+R2C/default XLIO is the behavioral target for this feature.
+The kernel is characterization only and is expected to differ for some `MSG_WAITALL` cases and for `connect-repeat`: the kernel permits a fresh retry on the same socket after a refused attempt, while XLIO maps the repeat attempt to `ECONNABORTED` per the single-attempt contract.
+Use physical host addresses for XLIO validation because loopback traffic is passed to the kernel.
+Leave hardware flow tags at their default setting for the final feature gate.
+`XLIO_DISABLE_FLOW_TAG=1` may be used only for a separately labeled diagnostic isolation run and is not acceptance evidence.
+Run the two-host commands through any two-host runner and preserve both process exit statuses and logs.
+
+The `accept-timeout` case validates only that `SO_RCVTIMEO` bounds the blocking `accept()` and reports the measured result and elapsed time.
+It does not require the same R2C listener to accept another connection after the timeout because the measured default implementation does not provide that recovery behavior.
+
+Case index
+----------
+
+A run without `--case` executes every default case in table order and finishes with `exit-listener`; every case also runs standalone via `--case NAME` in its own server/client process pair.
+Default cases:
+
+`accept-nonblocking` - a nonblocking accept returns a prompt `EAGAIN` with no connection queued.
+`accept-timeout` - `SO_RCVTIMEO` bounds a blocking `accept()` (detailed below).
+`peek` - `MSG_PEEK` does not consume worker-mode receive data.
+`waitall` - `MSG_WAITALL` waits for a fragmented payload.
+`blocking-send` - one blocking `send()` completes its full request after backpressure (detailed below).
+`send-after-shut-wr` - `send()` after `shutdown(SHUT_WR)` fails with `EPIPE` and sends no peer byte (detailed below).
+`tx-close` - concurrent TX and close drain queued worker jobs safely.
+`prefix-eof` - `recv()` returns a queued prefix and then EOF after the peer's FIN.
+`peek-waitall` - `MSG_PEEK|MSG_WAITALL` returns a held first fragment without consuming it (detailed below).
+`multi-writer` - multiple concurrent writers conserve every byte.
+`accept-inherit` - a plain `accept()` returns a blocking child from a nonblocking listener.
+`accept4-nonblock` - `accept4(SOCK_NONBLOCK)` sets only the child nonblocking.
+`readiness` - poll, select and epoll readiness match the kernel.
+`exit-listener` - an active-listener close and a SIGINT shutdown do not deadlock; it always runs last, outside the case table, because it raises SIGINT in its own process after the final client marker.
+
+Opt-in cases (each documented in its section below): `mixed-route-accept` and `mixed-route-accept-timeout` - a blocking (or `SO_RCVTIMEO`-bounded) `accept()` observes a kernel-routed connection through the watched shadow listener; `waitall-shut-rd` - `MSG_WAITALL` preserves a partial prefix across read shutdown; `shared-cq-idle` - shared-CQ traffic does not wake idle worker receive waiters; `admission-close` - a close racing worker API admission preserves socket lifetime; `recv-close-fence-order` - pauses the worker's close control through the `-D_DEBUG` scheduling hook to prove an admitted receive completion is processed before the close; plus `accept4-flags`, `concurrent-recv`, `rcvtimeo-partial`, `dontwait-progress`, `send-timeout`, the four `signal-*` probes, the three `cancel-*` cases, `timewait-reuse`, `queue-reservation`, `recv-close-copy`, `send-close-tail`, `epoll-distinct-close`, and `connect-repeat`.
+
+R2C compatibility cases
+-----------------------
+
+The default run includes three deterministic cases whose assertions encode existing R2C behavior.
+Each case emits one normalized `OBSERVE` line so an R2C and worker-mode pair can also be compared directly.
+
+`--case send-after-shut-wr` establishes a connection, completes `shutdown(SHUT_WR)`, and then makes exactly one `send(MSG_NOSIGNAL)` while ordinary send credit would still be available.
+The R2C contract is `send_result=-1`, `send_errno=EPIPE`, and `peer_result=0`, proving that the peer observed EOF without a post-shutdown byte.
+
+`--case blocking-send` configures a small sender `SO_SNDBUF` and receiver `SO_RCVBUF`, then makes exactly one 32 MiB blocking `send()` while the peer deliberately withholds reads for 1500 ms.
+The R2C contract is one call returning the full 32 MiB request after the delayed read begins, with the peer receiving exactly the same byte count.
+The 1500 ms delay is part of the behavior being tested, not a synchronization guess.
+
+`--case peek-waitall` makes the first 4 bytes readable and holds the second 4 bytes behind a control-channel barrier.
+The R2C contract is a 4-byte `MSG_PEEK|MSG_WAITALL` result within 500 ms, well before its separate 1000 ms safety timeout, followed by an ordinary receive of the same first fragment.
+Only after that return and non-consumption proof does the server release the client to send and verify the second fragment.
+
+These cases intentionally fail when worker mode changes an observable contract relative to R2C, even if the worker result resembles Linux behavior.
+
+Concurrent same-socket receive characterization
+------------------------------------------------
+
+`--case concurrent-recv` is an opt-in concurrent-receive reproducer and is not an RM#4930786 acceptance case.
+It starts two blocking `recv()` calls on one established socket, sends one byte that must complete exactly one call, then sends a cleanup byte that must complete the remaining call.
+The sequence repeats 256 times without reconnecting, so the scenario isolates same-socket receive concurrency from connection and ring initialization churn.
+A clean R2C build crashed in `neigh_eth` construction under this scenario, so R2C does not establish concurrent receive on one socket as a supported blocking-socket contract.
+Worker-mode runs are safety characterization only unless a separate feature defines this concurrency contract.
+
+Default-mode compatibility-gap probes
+-------------------------------------
+
+`--case rcvtimeo-partial` and `--case dontwait-progress` are opt-in reproducers, not RM#4930786 acceptance cases.
+The measured R2C runs did not complete these scenarios within the external watchdog, so worker mode is not required to add the stronger Linux-like results asserted by those probes.
+Their source is retained for a separate default-mode socket-compatibility effort.
+
+`--case accept4-flags` is an opt-in invalid-flag compatibility probe, not an RM#4930786 acceptance case.
+It belongs to a separate socket-API compatibility effort because correcting behavior outside the measured worker blocking-socket contract would also change default XLIO behavior.
+
+`--case send-timeout` is an opt-in `SO_SNDTIMEO` compatibility probe, not an RM#4930786 acceptance case.
+It belongs to the same separate compatibility effort and must not be promoted into the default release matrix without an explicit R2C contract decision.
+
+Signal behavior probes
+----------------------
+
+Run each signal probe in its own server/client process pair with `--case signal-accept`, `--case signal-accept-restart`, `--case signal-recv`, or `--case signal-recv-restart`.
+The `-restart` variants install the directed signal handler with `SA_RESTART`; the other variants install the same handler without it.
+Use the same command and environment for the R2C/default-XLIO and worker-mode runs, changing only the worker-mode configuration.
+Each server emits exactly one normalized line such as:
+
+    OBSERVE case=signal-recv syscall=recv sa_restart=0 result=-1 errno=4 completed_after_peer_progress=0
+
+Treat the R2C/default-XLIO line as the behavioral target and the kernel line as characterization only.
+The probe accepts either a signal interruption or successful completion after the peer is released, but still fails on a crash, timeout, protocol error, or any result that is unsafe for those two phases.
+A completed two-host validation matrix returned `-1/EINTR` for blocking `accept()` and `recv()` in R2C and one-worker interrupt mode, both with and without `SA_RESTART`.
+True restart semantics are therefore not an RM#4930786 requirement and remain a separate compatibility contract.
+
+Cancellation and lifetime race cases
+------------------------------------
+
+The cancellation and lifetime cases are opt-in so they do not silently change the established default parity-matrix count.
+Run each case in its own bounded server/client process pair.
+
+`--case cancel-accept` cancels a thread blocked in `accept()`, requires the thread to join as `PTHREAD_CANCELED`, and then proves that the same listener can accept a fresh connection.
+
+`--case cancel-recv` cancels a thread blocked in `recv()`, requires the thread to join as `PTHREAD_CANCELED`, and then proves that a fresh receive on the same connection returns peer data.
+
+`--case cancel-send` creates deterministic TCP backpressure and directs `pthread_cancel()` to the blocked sender.
+The measured R2C contract allows either prompt cancellation or deferred termination after the peer starts draining.
+The case requires bounded safe termination after that progress point and proves that a subsequent one-byte send on the same connection reaches the peer as the stream suffix.
+
+The separate `blocking_connect_cancel_e2e` target validates the feature-owned blocking-connect cancellation transaction without importing the broader signal-compatibility work.
+Its raw-packet peer answers ARP for an otherwise unused on-link IPv4 address, captures the initial SYN, withholds the SYN-ACK until after the connector must have acknowledged `pthread_cancel()`, and then injects a valid delayed SYN-ACK.
+Every client requires a bounded `PTHREAD_CANCELED` join.
+The peer requires a final ACK to the delayed SYN-ACK.
+This captures the measured R2C and Linux contract: cancellation terminates the calling thread, while the open socket's connect attempt continues asynchronously.
+Worker-mode acceptance additionally runs the `--probe-socket` path, which requires a successful post-handshake send and bounded close.
+R2C and Linux characterization omit that API probe because R2C does not establish a reusable-socket or bounded-close contract for the canceled caller to exercise directly.
+Run the peer as root because its `AF_PACKET` socket requires `CAP_NET_RAW`.
+Build it through the normal project target:
+
+    make -C tests/extra_api blocking_connect_cancel_e2e
+
+The kernel result is characterization only.
+R2C/default XLIO remains the behavioral target, while worker mode additionally must preserve the generation and owner-cleanup safety introduced by this feature.
+
+`--case timewait-reuse` repeats 16 active-close handshakes and reconnects from the same client source port to the same listener.
+The immediate same-tuple SYN forces the incoming XLIO TIME_WAIT reuse path without waiting for 2MSL.
+
+`--case queue-reservation` registers a missing anonymous page with `userfaultfd` and starts a send from that page.
+The resulting page fault occurs after worker TX has reserved a queue node but before it can publish the job.
+With one worker thread, `shutdown(SHUT_WR)` on a second worker-owned socket must still complete within 750 ms before the missing page is supplied.
+The harness then resolves the page fault and proves that the stalled send completes exactly once.
+Run this case as a privileged lab process because the host may restrict `userfaultfd` to callers with `CAP_SYS_PTRACE`.
+
+`--case recv-close-copy` consumes one byte from a single TCP payload, then faults the first destination page of a two-iovec `recvmsg()` while XLIO holds the remaining RX descriptor outside the socket lock.
+The server closes the socket while the peer runs a bounded pre-release close probe.
+The peer must not observe close until the server resolves the page fault and the admitted receive completes.
+The admitted `recvmsg()` must still return the exact following 256 stream bytes without a duplicated or skipped byte at the iovec boundary.
+This deterministically proves that worker close cannot reset a detached receive offset or overtake an admitted receive completion.
+Run this case as a privileged lab process for the same `userfaultfd` reason as `queue-reservation`.
+
+`--case send-close-tail` performs the exact terminal pattern on the long-lived harness control socket: one byte, four bytes, immediate socket close after both calls report success, and immediate client process return.
+The server must receive all five accepted bytes after the client exits, matching the measured R2C contract and proving that worker close and process teardown cannot overtake accepted TX data on an established control stream.
+R2C did not reliably expose EOF in this immediate-exit scenario, so EOF is characterization only and is not a worker-mode acceptance requirement.
+
+`--case epoll-distinct-close` registers three accepted sockets in one epoll set in B, C, A order, starts synchronized closes of B and A, and then requires C readiness and data identity to survive compaction.
+The sequence repeats 256 times so both worker fd-map slots repeatedly race epoll cleanup while the deterministic registry unit test forces the exact B-first displacement order.
+This is feature acceptance coverage for worker close after fd-map admission is cleared, not a claim that generic legacy epoll lifetime has been redesigned.
+
+`--case connect-repeat` issues a blocking `connect()` to a server-host port with no listener, requires the refused first attempt to fail with `ECONNREFUSED`, and then requires a second `connect()` on the same fd to fail with `ECONNABORTED`.
+The second errno is the shared default-mode state mapping at the top of `sockinfo_tcp::connect()` (`report_connected && is_errorable()`), which the single-attempt worker contract routes repeat calls through instead of starting a new handshake; R2C takes the same branch, so the oracle relationship holds.

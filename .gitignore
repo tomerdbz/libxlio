@@ -69,6 +69,8 @@ src/stats/xlio_stats
 src/vlogger/vlogger_test
 src/state_machine/state_machine_test
 tests/gtest/gtest
+tests/extra_api/blocking_socket_workers_e2e
+tests/extra_api/blocking_connect_cancel_e2e
 
 # build products
 build/libxlio.spec

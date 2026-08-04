@@ -429,6 +429,7 @@ AC_CONFIG_FILES([
 		tests/Makefile
 		tests/gtest/Makefile
 		tests/unit_tests/Makefile
+		tests/extra_api/Makefile
 		tools/Makefile
 		tools/daemon/Makefile
 		docs/man/Makefile
