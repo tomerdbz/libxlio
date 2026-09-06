@@ -123,6 +123,7 @@ gtest_SOURCES = \
 	core/xlio_base.cc \
 	core/xlio_sockopt.cc \
 	core/blocking_wait_test.cc \
+	core/blocking_wait_results_test.cc \
 	\
 	xliod/xliod_base.cc \
 	xliod/xliod_hash.cc \
