@@ -64,7 +64,15 @@ public:
     int block(int timeout_ms)
     {
         struct epoll_event evs[4];
-        return ::epoll_wait(m_epfd, evs, 4, timeout_ms);
+        m_woken_by_watched_fd = false;
+        const int count = ::epoll_wait(m_epfd, evs, 4, timeout_ms);
+
+        for (int index = 0; index < count; ++index) {
+            if (evs[index].data.fd == m_watched_fd) {
+                m_woken_by_watched_fd = true;
+            }
+        }
+        return count;
     }
 
     void disarm()
@@ -86,10 +94,24 @@ public:
         ::epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_pipe[0], &ev);
     }
 
+    bool watch_fd(int fd)
+    {
+        struct epoll_event ev = {};
+
+        ev.events = EPOLLIN;
+        ev.data.fd = fd;
+        m_watched_fd = fd;
+        return ::epoll_ctl(m_epfd, EPOLL_CTL_ADD, fd, &ev) == 0;
+    }
+
+    bool was_woken_by_watched_fd() const { return m_woken_by_watched_fd; }
+
 private:
     int m_epfd = -1;
     int m_pipe[2] = {-1, -1};
+    int m_watched_fd = -1;
     bool m_armed = false;
+    bool m_woken_by_watched_fd = false;
 };
 
 // Production waiter: one wakeup_pipe + one m_rx_epfd + m_is_sleeping. Pipe byte stays unread.
@@ -251,6 +273,34 @@ TEST(blocking_wait, worker_wakes_sleeping_app)
     EXPECT_EQ(blocking_wait::result::READY, r);
     // Lost wakeup would land near the 5s timeout, not ~100ms after notify.
     EXPECT_LT(took, 2000);
+}
+
+// Shadow-listener readiness must be pred, not a spurious wake.
+TEST(blocking_wait, watched_external_fd_returns_control)
+{
+    test_waiter w;
+    std::mutex lock;
+    int external_pipe[2] = {-1, -1};
+
+    ASSERT_EQ(0, ::pipe(external_pipe));
+    ASSERT_TRUE(w.watch_fd(external_pipe[0]));
+
+    std::thread producer([&] {
+        std::this_thread::sleep_for(ms(100));
+        const ssize_t written = ::write(external_pipe[1], "x", 1);
+        (void)written;
+    });
+
+    lock.lock();
+    const blocking_wait::result r = blocking_wait::wait_until(
+        lock, w, [&] { return w.was_woken_by_watched_fd(); }, 2000);
+    lock.unlock();
+
+    producer.join();
+    EXPECT_EQ(blocking_wait::result::READY, r);
+    EXPECT_TRUE(w.was_woken_by_watched_fd());
+    ::close(external_pipe[0]);
+    ::close(external_pipe[1]);
 }
 
 TEST(blocking_wait, no_lost_wakeup_when_signaled_in_check_sleep_window)
