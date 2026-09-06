@@ -14,6 +14,7 @@
 #include "event/event_handler_manager.h"
 #include "event/timer_handler.h"
 #include "sock/cleanable_obj.h"
+#include "sock/fd_socket_slot.h"
 #include "sock/sockinfo.h"
 #include "iomux/epfd_info.h"
 #include "utils/lock_wrapper.h"
@@ -49,6 +50,71 @@ protected:
 
 class fd_collection : private lock_mutex_recursive {
 public:
+    enum class worker_close_result {
+        NOT_WORKER,
+        CLAIMED,
+    };
+
+    enum class socket_call_status {
+        NOT_XLIO,
+        ACQUIRED,
+        RETIRING,
+    };
+
+    struct worker_close_claim {
+        worker_close_result result = worker_close_result::NOT_WORKER;
+        sockinfo_tcp *sock = nullptr;
+    };
+
+    class socket_call_ref {
+    public:
+        socket_call_ref() = default;
+        socket_call_ref(sockinfo *sock, bool owns_worker_ref,
+                        socket_call_status status = socket_call_status::NOT_XLIO)
+            : m_sock(sock)
+            , m_owns_worker_ref(owns_worker_ref)
+            , m_status(sock ? socket_call_status::ACQUIRED : status)
+        {
+        }
+        socket_call_ref(socket_call_ref &&other) noexcept;
+        socket_call_ref &operator=(socket_call_ref &&other) noexcept;
+        ~socket_call_ref() { reset(); }
+
+        socket_call_ref(const socket_call_ref &) = delete;
+        socket_call_ref &operator=(const socket_call_ref &) = delete;
+
+        sockinfo *get() const { return m_sock; }
+        sockinfo *operator->() const { return m_sock; }
+        explicit operator bool() const { return m_sock != nullptr; }
+        bool owns_worker_ref() const { return m_owns_worker_ref; }
+        socket_call_status status() const { return m_status; }
+        sockinfo *detach(bool &owns_worker_ref)
+        {
+            sockinfo *sock = m_sock;
+            owns_worker_ref = m_owns_worker_ref;
+            m_sock = nullptr;
+            m_owns_worker_ref = false;
+            m_status = socket_call_status::NOT_XLIO;
+            return sock;
+        }
+
+    private:
+        static void release_worker_socket_ref(sockinfo *sock);
+        void reset()
+        {
+            if (m_sock && m_owns_worker_ref) {
+                release_worker_socket_ref(m_sock);
+            }
+            m_sock = nullptr;
+            m_owns_worker_ref = false;
+            m_status = socket_call_status::NOT_XLIO;
+        }
+
+        sockinfo *m_sock = nullptr;
+        bool m_owns_worker_ref = false;
+        socket_call_status m_status = socket_call_status::NOT_XLIO;
+    };
+
     fd_collection();
     ~fd_collection() override;
 
@@ -80,6 +146,9 @@ public:
      * Remove sockinfo.
      */
     int del_sockfd(int fd, bool is_for_udp_pool = false);
+    worker_close_claim claim_worker_tcp_close(int fd);
+    void submit_worker_tcp_close(sockinfo_tcp *sock, bool force = false);
+    void retire_worker_sockets_for_shutdown();
 
     /**
      * Handle worker threads mode close flow.
@@ -90,13 +159,13 @@ public:
     /**
      * Handle listen socket close in worker threads mode - send jobs to children and wait.
      */
-    void handle_listen_socket_close_worker_threads_mode(sockinfo_tcp *listen_si);
+    void handle_listen_socket_close_worker_threads_mode(sockinfo_tcp *listen_si, bool force);
 
     /**
      * Handle socket close job in worker threads mode - remove from fd_col and send job to entity
      * context.
      */
-    void handle_socket_close_job_worker_threads_mode(sockinfo_tcp *si);
+    void handle_socket_close_job_worker_threads_mode(sockinfo_tcp *si, bool force = false);
 
     /**
      * Remove epfd_info.
@@ -109,8 +178,10 @@ public:
      */
     int del_cq_channel_fd(int fd, bool b_cleanup = false);
 
-    void set_socket(int fd, sockinfo *si) { m_p_sockfd_map[fd] = si; }
-    void clear_socket(int fd) { m_p_sockfd_map[fd] = nullptr; }
+    void set_socket(int fd, sockinfo *si);
+    bool publish_worker_socket_if_open(int fd, sockinfo_tcp *si);
+    void clear_socket(int fd) { m_p_sockfd_map[fd].clear(); }
+    bool clear_socket_if(int fd, const sockinfo *expected);
 
     /**
      * Call set_immediate_os_sample of the input fd.
@@ -123,6 +194,7 @@ public:
      * Get sockinfo by fd.
      */
     inline sockinfo *get_sockfd(int fd);
+    socket_call_ref acquire_socket_call(int fd);
 
     /**
      * Get epfd_info by fd.
@@ -142,7 +214,7 @@ public:
     /**
      * Remove fd from the collection of all epfd's
      */
-    void remove_from_all_epfds(int fd, bool passthrough);
+    void remove_from_all_epfds(int fd, bool passthrough, sockinfo *expected_socket = nullptr);
 
     /**
      * Remove everything from the collection.
@@ -165,7 +237,7 @@ public:
 private:
     template <typename cls> int del(int fd, bool b_cleanup, cls **map_type);
     template <typename cls> inline cls *get(int fd, cls **map_type);
-    int del_socket(int fd, sockinfo **map_type);
+    int del_socket(int fd);
     inline bool is_valid_fd(int fd);
 
     inline bool create_offloaded_sockets();
@@ -181,7 +253,7 @@ private:
 
 private:
     int m_n_fd_map_size;
-    sockinfo **m_p_sockfd_map;
+    fd_socket_slot *m_p_sockfd_map;
     epfd_info **m_p_epfd_map;
     cq_channel_info **m_p_cq_channel_map;
 
@@ -225,7 +297,7 @@ inline void fd_collection::reuse_sockfd(int fd, sockinfo *p_sfd_api_obj)
 {
     lock();
     m_pending_to_remove_lst.erase(p_sfd_api_obj);
-    m_p_sockfd_map[fd] = p_sfd_api_obj;
+    set_socket(fd, p_sfd_api_obj);
     --g_global_stat_static.n_pending_sockets;
     unlock();
 }
@@ -241,7 +313,10 @@ inline void fd_collection::destroy_sockfd(sockinfo *p_sfd_api_obj)
 
 inline sockinfo *fd_collection::get_sockfd(int fd)
 {
-    return get(fd, m_p_sockfd_map);
+    if (!is_valid_fd(fd)) {
+        return nullptr;
+    }
+    return m_p_sockfd_map[fd].load().socket;
 }
 
 inline epfd_info *fd_collection::get_epfd(int fd)
@@ -267,6 +342,17 @@ inline sockinfo *fd_collection_get_sockfd(int fd)
         return g_p_fd_collection->get_sockfd(fd);
     }
     return nullptr;
+}
+
+inline fd_collection::socket_call_ref fd_collection_acquire_socket_call(int fd)
+{
+    if (g_p_fd_collection) {
+        if (safe_mce_sys().worker_threads == 0) {
+            return fd_collection::socket_call_ref(g_p_fd_collection->get_sockfd(fd), false);
+        }
+        return g_p_fd_collection->acquire_socket_call(fd);
+    }
+    return {};
 }
 
 inline epfd_info *fd_collection_get_epfd(int fd)

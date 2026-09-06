@@ -10,6 +10,7 @@
 #include <util/wakeup_pipe.h>
 #include <sock/cleanable_obj.h>
 #include <sock/sockinfo.h>
+#include <iomux/epoll_offloaded_registry.h>
 
 class entity_context;
 
@@ -71,13 +72,13 @@ public:
      * @param fd File descriptor.
      * @return Pointer to user data if the data for this fd was found.
      */
-    epoll_fd_rec *get_fd_rec(int fd);
+    epoll_fd_rec *get_fd_rec(int fd, sockinfo *expected_socket = nullptr);
 
     /**
      * Called when fd is closed, to remove it from this set.
      * @param fd Closed file descriptor.
      */
-    void fd_closed(int fd, bool passthrough = false);
+    void fd_closed(int fd, bool passthrough = false, sockinfo *expected_socket = nullptr);
 
     /**
      * @return Pointer to statistics block for this group
@@ -115,7 +116,7 @@ public:
 
 private:
     int add_fd(int fd, epoll_event *event);
-    int del_fd(int fd, bool passthrough = false);
+    int del_fd(int fd, bool passthrough = false, sockinfo *expected_socket = nullptr);
     int mod_fd(int fd, epoll_event *event);
     void remove_socket_from_ready_list(sockinfo *sk);
 
@@ -126,8 +127,7 @@ public:
 private:
     const int m_epfd;
     int m_size;
-    int *m_p_offloaded_fds;
-    int m_n_offloaded_fds;
+    epoll_offloaded_registry m_offloaded_registry;
     fd_info_map_t m_fd_non_offloaded_map;
     fd_info_list_t m_fd_offloaded_list;
     ring_map_t m_ring_map;

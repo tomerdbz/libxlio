@@ -1452,7 +1452,7 @@ void sockinfo::statistics_print(vlog_levels_t log_level /* = VLOG_DEBUG */)
 // Sleep on different CQs and OS listen socket
 int sockinfo::os_wait_sock_rx_epfd(epoll_event *ep_events, int maxevents)
 {
-    if (unlikely(safe_mce_sys().rx_cq_wait_ctrl)) {
+    if (unlikely(safe_mce_sys().rx_cq_wait_ctrl) && !m_entity_context) {
         add_cqfd_to_sock_rx_epfd(m_p_rx_ring);
         int ret =
             SYSCALL(epoll_wait, m_rx_epfd, ep_events, maxevents, m_loops_timer.time_left_msec());
@@ -1544,7 +1544,10 @@ void sockinfo::rx_add_ring_cb(ring *p_ring)
         // Kernel loops through all the 350K epfds. By setting safe_mce_sys().rx_cq_wait_ctrl=true,
         // we add the cq-fd only to the epfds of the sockets that are going to sleep inside
         // sockinfo_tcp::rx_wait_helper/sockinfo_udp::rx_wait.
-        if (!safe_mce_sys().rx_cq_wait_ctrl) {
+        // Worker-owned sockets receive CQ progress from their entity context. Registering the
+        // shared CQ fd on every private socket epoll instance wakes all blocked worker sockets
+        // whenever any sibling socket receives traffic.
+        if (!safe_mce_sys().rx_cq_wait_ctrl && !m_entity_context) {
             add_cqfd_to_sock_rx_epfd(p_ring);
         }
 
@@ -1610,7 +1613,7 @@ void sockinfo::rx_del_ring_cb(ring *p_ring)
                     p_ring_info->rx_reuse_info.rx_reuse.size());
             }
 
-            if (!safe_mce_sys().rx_cq_wait_ctrl) {
+            if (!safe_mce_sys().rx_cq_wait_ctrl && !m_entity_context) {
                 remove_cqfd_from_sock_rx_epfd(base_ring);
             }
 

@@ -14,6 +14,7 @@
 #include "dev/cq_mgr_rx.h"
 #include "xlio_extra.h"
 #include <atomic>
+#include <memory>
 #include <vector>
 
 #include "lwip/opt.h"
@@ -22,6 +23,7 @@
 #include "sockinfo.h"
 #include "sockinfo_ulp.h"
 #include "sockinfo_tcp_listen_context.h"
+#include "worker_socket_state.h"
 
 /* Forward declarations */
 struct xlio_socket_attr;
@@ -159,6 +161,10 @@ enum inet_ecns {
 };
 
 class sockinfo_tcp : public sockinfo {
+    friend class entity_context;
+    friend class fd_collection;
+    friend class tcp_timers_collection;
+
 public:
     static inline size_t accepted_conns_node_offset()
     {
@@ -202,9 +208,10 @@ public:
     int getsockopt_offload(int __level, int __optname, void *__optval, socklen_t *__optlen);
     int connect(const sockaddr *, socklen_t) override;
     void connect_entity_context() override;
+    void cancel_connect_entity_context();
     void listen_entity_context();
     int harvest_sockinfo_tcp_listen_objects();
-    inline bool try_harvest_from_rss_child(size_t rss_child_index);
+    inline bool try_harvest_from_rss_child(sockinfo_tcp *rss_child, size_t rss_child_index);
     void set_entity_context(entity_context *ctx) override;
 
     // Listen context management
@@ -319,6 +326,14 @@ public:
                 m_sock_state == TCP_SOCK_CONNECTED_RDWR);
     }
 
+    // Unlike is_rtr(), this reports only whether transport can still produce receive data. Worker
+    // MSG_WAITALL needs the distinction so a terminal state can end the call while a partial
+    // prefix remains queued for a later ordinary receive.
+    inline bool is_rx_open() const
+    {
+        return m_sock_state == TCP_SOCK_CONNECTED_RD || m_sock_state == TCP_SOCK_CONNECTED_RDWR;
+    }
+
     bool is_rts()
     {
         // ready to send
@@ -381,15 +396,17 @@ public:
     inline int trylock_tcp_con() { return m_tcp_con_lock.trylock(); }
     inline void lock_tcp_con() { m_tcp_con_lock.lock(); }
     inline void unlock_tcp_con() { m_tcp_con_lock.unlock(); }
-    // Under m_tcp_con_lock. First close job only; later close()/handle_close() return false.
-    inline bool try_route_worker_close()
-    {
-        if (m_worker_close_routed) {
-            return false;
-        }
-        m_worker_close_routed = true;
-        return true;
-    }
+    bool enable_worker_posix_lifetime() noexcept;
+    bool is_worker_posix_managed() const { return m_worker_state != nullptr; }
+    bool try_acquire_worker_call_ref();
+    bool try_acquire_worker_job_ref();
+    void release_worker_ref();
+    void wakeup_worker_blocking_waiters();
+    bool begin_worker_retirement();
+    void set_worker_retire_owner(entity_context *owner) { worker_state().m_retire_owner = owner; }
+    entity_context *get_worker_retire_owner() const { return worker_state().m_retire_owner; }
+    worker_socket_lifecycle worker_lifecycle() const { return worker_state().m_lifetime.state(); }
+    uint32_t worker_ref_count() const { return worker_state().m_lifetime.ref_count(); }
     tcp_timers_collection *get_tcp_timer_collection();
     bool is_cleaned() const { return m_is_cleaned; }
     static err_t rx_lwip_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
@@ -419,6 +436,27 @@ protected:
                             int *p_out_flags) override;
 
 private:
+    class worker_rx_call_guard {
+    public:
+        explicit worker_rx_call_guard(sockinfo_tcp &sock) noexcept
+            : m_sock(sock)
+        {
+        }
+        ~worker_rx_call_guard() noexcept;
+
+        worker_rx_call_guard(const worker_rx_call_guard &) = delete;
+        worker_rx_call_guard &operator=(const worker_rx_call_guard &) = delete;
+
+        bool enter();
+
+    private:
+        sockinfo_tcp &m_sock;
+        bool m_active = false;
+    };
+
+    bool begin_worker_rx_call();
+    void end_worker_rx_call() noexcept;
+
     int fcntl_helper(int __cmd, unsigned long int __arg, bool &bexit);
     void get_tcp_info(struct tcp_info *ti);
 
@@ -440,7 +478,8 @@ private:
     // Called when legal syn is received in order to remember the new active pcb which
     // is already created by lwip, but no sockinfo instance is created yet at this stage
     static err_t syn_received_lwip_cb(void *arg, struct tcp_pcb *newpcb);
-    static err_t syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb);
+    static err_t syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb,
+                                          enum tcp_timewait_reuse_phase phase);
 
     static err_t syn_received_drop_lwip_cb(void *arg, struct tcp_pcb *newpcb);
 
@@ -458,13 +497,15 @@ private:
 
     int accept_helper(struct sockaddr *__addr, socklen_t *__addrlen, int __flags = 0);
     // Entered and returned with the listen lock held.
-    int accept_wait_threads_mode();
+    int accept_wait_threads_mode(loops_timer &accept_timeout);
 
     // clone socket in accept call
     sockinfo_tcp *accept_clone();
 
     bool create_listen_rss_children();
-    void start_sockinfo_tcp_listen_objects();
+    bool start_sockinfo_tcp_listen_objects();
+    void close_unstarted_listen_rss_children();
+    void close_started_listen_rss_children();
     bool wait_for_listen_rss_children_ready();
 
     // connect() helper & callback func
@@ -472,8 +513,10 @@ private:
     static err_t connect_lwip_cb(void *arg, struct tcp_pcb *tpcb, err_t err);
     // tx
     unsigned tx_wait(bool blocking);
-    // Socket lock held. Do not lock again in threads_mode.
+    // Worker-threads-mode blocking-send wait via the shared blocking_wait handoff, and the
+    // R2C / non-worker-threads ring-poll fallback. Split by tx_wait() mirroring rx_sleep_wait().
     unsigned tx_wait_threads_mode();
+    unsigned tx_wait_threads_mode(loops_timer &send_timeout);
     unsigned tx_wait_poll(bool blocking);
     int os_epoll_wait_with_tcp_timers(epoll_event *ep_events, int maxevents);
     void handle_incoming_handshake_failure(sockinfo_tcp *child_conn);
@@ -500,15 +543,17 @@ private:
     void register_timer();
     void remove_timer();
     void handle_socket_linger();
+    int shutdown_entity_context(int how);
     bool connect_bind_any_and_check_rules();
     void connect_async_set_errs();
     int connect_threads_mode();
     // Socket lock held.
     int connect_wait_threads_mode();
-    int rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout);
-    int rx_sleep_wait(loops_timer &rcv_timeout);
+    int rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout,
+                         size_t min_ready_bytes = 1U);
+    int rx_sleep_wait(loops_timer &rcv_timeout, size_t min_ready_bytes = 1U);
     // Entered and returned without the socket lock.
-    int rx_sleep_wait_threads_mode(loops_timer &rcv_timeout);
+    int rx_sleep_wait_threads_mode(loops_timer &rcv_timeout, size_t min_ready_bytes);
     int rx_sleep_wait_poll(loops_timer &rcv_timeout);
 
     ssize_t rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p_flags, sockaddr *__from,
@@ -580,7 +625,9 @@ private:
 
     void post_dequeue() override {};
 
-    size_t rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, struct msghdr *__msg);
+    ssize_t rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, size_t iov_offset,
+                                   struct msghdr *__msg);
+    size_t rx_peek_ready_buffers(iovec *p_iov, iovec *p_iov_end, int flags, struct msghdr *__msg);
 
     // Returns the connected pcb, with 5 tuple which matches the input arguments,
     // in state "SYN Received" or NULL if pcb wasn't found
@@ -619,6 +666,17 @@ public:
     list_node<sockinfo_tcp, sockinfo_tcp::accepted_conns_node_offset> accepted_conns_node;
 
 private:
+    worker_socket_state &worker_state()
+    {
+        assert(m_worker_state);
+        return *m_worker_state;
+    }
+    const worker_socket_state &worker_state() const
+    {
+        assert(m_worker_state);
+        return *m_worker_state;
+    }
+
     sockinfo_tcp_ops *m_ops;
     sockinfo_tcp_ops *m_ops_tcp;
 
@@ -664,11 +722,14 @@ private:
 
     multilock m_tcp_con_lock;
 
+    // Created before worker-ref fd publication and retained until socket destruction.
+    // Default R2C and non-POSIX socket objects pay only this pointer-sized representation cost.
+    std::unique_ptr<worker_socket_state> m_worker_state;
+
     // used for reporting 'connected' on second non-blocking call to connect or
     // second call to failed connect blocking socket.
     bool report_connected;
     bool m_is_cleaned = false; // If this socket registered deletion on internal thread.
-    bool m_worker_close_routed = false; // under lock: close job posted at most once
     int m_error_status;
 
     const buffer_batching_mode_t m_sysvar_buffer_batching_mode;

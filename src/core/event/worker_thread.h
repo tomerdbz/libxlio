@@ -43,7 +43,8 @@
 class worker_thread {
 public:
     void start_thread(entity_context *ctx);
-    void stop_thread();
+    void request_stop();
+    void join();
 
 private:
     static void worker_thread_main(worker_thread &t, entity_context *ctx);
@@ -55,6 +56,7 @@ private:
     // The context of the thread.
     // Must be atomic for the start and stop to synchronize.
     std::atomic_bool m_running {false};
+    std::atomic_bool m_stop_requested {false};
 };
 
 #endif // WORKER_THREAD_H

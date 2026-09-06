@@ -59,6 +59,14 @@ using namespace std;
 #define srdr_logdbg_exit  __log_exit_dbg
 #define srdr_logfunc_exit __log_exit_func
 
+#define ACQUIRE_SOCKET_CALL_OR_RETURN(fd, socket_object)                                           \
+    fd_collection::socket_call_ref socket_ref = fd_collection_acquire_socket_call(fd);             \
+    if (unlikely(socket_ref.status() == fd_collection::socket_call_status::RETIRING)) {            \
+        errno = EBADF;                                                                             \
+        return -1;                                                                                 \
+    }                                                                                              \
+    sockinfo *socket_object = socket_ref.get()
+
 #define EP_MAX_EVENTS (int)((INT_MAX / sizeof(struct epoll_event)))
 struct sigaction g_act_prev;
 sighandler_t g_sighandler = nullptr;
@@ -212,8 +220,17 @@ bool handle_close(int fd, bool cleanup, bool passthrough)
 {
     bool to_close_now = true;
     bool is_for_udp_pool = false;
+    sockinfo *sockfd = nullptr;
+    fd_collection::worker_close_claim worker_claim;
 
     srdr_logfunc("Cleanup fd=%d cleanup=%d", fd, !!cleanup);
+
+    if (g_p_fd_collection && safe_mce_sys().worker_threads > 0) {
+        worker_claim = g_p_fd_collection->claim_worker_tcp_close(fd);
+        if (worker_claim.result == fd_collection::worker_close_result::CLAIMED) {
+            sockfd = worker_claim.sock;
+        }
+    }
 
     if (g_zc_cache) {
         g_zc_cache->handle_close(fd);
@@ -221,9 +238,14 @@ bool handle_close(int fd, bool cleanup, bool passthrough)
 
     if (g_p_fd_collection) {
         // Remove fd from all existing epoll sets
-        g_p_fd_collection->remove_from_all_epfds(fd, passthrough);
+        g_p_fd_collection->remove_from_all_epfds(
+            fd, passthrough,
+            worker_claim.result == fd_collection::worker_close_result::CLAIMED ? worker_claim.sock
+                                                                               : nullptr);
 
-        sockinfo *sockfd = fd_collection_get_sockfd(fd);
+        if (!sockfd) {
+            sockfd = fd_collection_get_sockfd(fd);
+        }
         if (sockfd) {
             // Don't call close(2) for objects without a shadow socket (TCP incoming sockets).
             to_close_now = !passthrough && sockfd->is_shadow_socket_present();
@@ -231,7 +253,11 @@ bool handle_close(int fd, bool cleanup, bool passthrough)
             // Save this value before pointer is destructed
             is_for_udp_pool = sockfd->m_is_for_socket_pool;
 #endif
-            g_p_fd_collection->del_sockfd(fd, is_for_udp_pool);
+            if (worker_claim.result == fd_collection::worker_close_result::CLAIMED) {
+                g_p_fd_collection->submit_worker_tcp_close(worker_claim.sock);
+            } else {
+                g_p_fd_collection->del_sockfd(fd, is_for_udp_pool);
+            }
             if (safe_mce_sys().deferred_close) {
                 to_close_now = false;
             }
@@ -701,6 +727,11 @@ static void handler_intr(int sig)
 {
     switch (sig) {
     case SIGINT:
+        // Worker-mode blocking waits (blocking_wait::wait_until) park in bounded slices and
+        // re-check a predicate that reads g_worker_blocking_exit, so a SIGINT delivered to any
+        // thread is observed within one slice. The store is async-signal-safe (lock-free atomic,
+        // see the static_assert in sys_vars.h) and unobserved in default mode.
+        g_worker_blocking_exit.store(true, std::memory_order_release);
         g_b_exit = true;
         srdr_logdbg("Catch Signal: SIGINT (%d)", sig);
         break;
@@ -719,6 +750,8 @@ static void handle_signal(int signum)
     srdr_logdbg_entry("Caught signal! signum=%d", signum);
 
     if (signum == SIGINT) {
+        // See handler_intr(): let bounded worker blocking waits observe process exit.
+        g_worker_blocking_exit.store(true, std::memory_order_release);
         g_b_exit = true;
     }
 
@@ -837,8 +870,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(shutdown)(int __fd, int __how)
 
     srdr_logdbg_entry("fd=%d, how=%d", __fd, __how);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         return p_socket_object->shutdown(__how);
     }
@@ -903,8 +935,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(listen)(int __fd, int backlog)
     }
 #endif /* DEFINED_ENVOY */
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
 
     if (p_socket_object) {
         // for verifying that the socket is really offloaded
@@ -934,8 +965,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(accept)(int __fd, struct sockaddr *__addr, socklen
 {
     PROFILE_FUNC
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         return p_socket_object->accept(__addr, __addrlen);
     }
@@ -948,8 +978,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(accept4)(int __fd, struct sockaddr *__addr, sockle
 {
     PROFILE_FUNC
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         return p_socket_object->accept4(__addr, __addrlen, __flags);
     }
@@ -1016,7 +1045,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(connect)(int __fd, const struct sockaddr *__to, so
     srdr_logdbg_entry("fd=%d, %s", __fd, sprintf_sockaddr(buf, 256, __to, __tolen));
 
     int ret = 0;
-    sockinfo *p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (!p_socket_object) {
         srdr_logdbg_exit("Unable to get sock_fd_api");
         ret = SYSCALL(connect, __fd, __to, __tolen);
@@ -1321,8 +1350,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(read)(int __fd, void *__buf, size_t __nbytes)
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1];
         piov[0].iov_base = __buf;
@@ -1349,8 +1377,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(__read_chk)(int __fd, void *__buf, size_t __nb
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         BULLSEYE_EXCLUDE_BLOCK_START
         if (__nbytes > __buflen) {
@@ -1381,8 +1408,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(readv)(int __fd, const struct iovec *iov, int 
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec *piov = (struct iovec *)iov;
         int dummy_flags = 0;
@@ -1403,8 +1429,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(recv)(int __fd, void *__buf, size_t __nbytes, 
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1];
         piov[0].iov_base = __buf;
@@ -1430,8 +1455,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(__recv_chk)(int __fd, void *__buf, size_t __nb
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         BULLSEYE_EXCLUDE_BLOCK_START
         if (__nbytes > __buflen) {
@@ -1466,8 +1490,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(recvmsg)(int __fd, struct msghdr *__msg, int _
         return -1;
     }
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         __msg->msg_flags = 0;
         return p_socket_object->rx(RX_RECVMSG, __msg->msg_iov, __msg->msg_iovlen, &__flags,
@@ -1524,8 +1547,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(recvmmsg)(int __fd, struct mmsghdr *__mmsghdr, uns
         // coverity[check_return]
         gettime(&start_time);
     }
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         int ret = 0;
         for (unsigned int i = 0; i < __vlen; i++) {
@@ -1583,8 +1605,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(recvfrom)(int __fd, void *__buf, size_t __nbyt
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1];
         piov[0].iov_base = __buf;
@@ -1614,8 +1635,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(__recvfrom_chk)(int __fd, void *__buf, size_t 
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         BULLSEYE_EXCLUDE_BLOCK_START
         if (__nbytes > __buflen) {
@@ -1643,8 +1663,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(write)(int __fd, __const void *__buf, size_t _
 
     srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1] = {{(void *)__buf, __nbytes}};
         xlio_tx_call_attr_t tx_arg;
@@ -1669,8 +1688,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(writev)(int __fd, const struct iovec *iov, int
 
     srdr_logfuncall_entry("fd=%d, %d iov blocks", __fd, iovcnt);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         xlio_tx_call_attr_t tx_arg;
 
@@ -1694,8 +1712,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(send)(int __fd, __const void *__buf, size_t __
 
     srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1] = {{(void *)__buf, __nbytes}};
         xlio_tx_call_attr_t tx_arg;
@@ -1722,8 +1739,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(sendmsg)(int __fd, __const struct msghdr *__ms
 
     srdr_logfuncall_entry("fd=%d", __fd);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         return sendmsg_internal(p_socket_object, __msg, __flags);
     }
@@ -1751,8 +1767,7 @@ EXPORT_SYMBOL int XLIO_SYMBOL(sendmmsg)(int __fd, struct mmsghdr *__mmsghdr, uns
         return -1;
     }
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         for (unsigned int i = 0; i < __vlen; i++) {
             xlio_tx_call_attr_t tx_arg;
@@ -1795,8 +1810,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(sendto)(int __fd, __const void *__buf, size_t 
 
     srdr_logfuncall_entry("fd=%d, nbytes=%d", __fd, __nbytes);
 
-    sockinfo *p_socket_object = nullptr;
-    p_socket_object = fd_collection_get_sockfd(__fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(__fd, p_socket_object);
     if (p_socket_object) {
         struct iovec piov[1] = {{(void *)__buf, __nbytes}};
         xlio_tx_call_attr_t tx_arg;
@@ -1821,7 +1835,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(sendfile)(int out_fd, int in_fd, off_t *offset
     srdr_logfuncall_entry("out_fd=%d, in_fd=%d, offset=%p, *offset=%zu, count=%d", out_fd, in_fd,
                           offset, offset ? *offset : 0, count);
 
-    sockinfo *p_socket_object = fd_collection_get_sockfd(out_fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(out_fd, p_socket_object);
     if (!p_socket_object) {
         return SYSCALL(sendfile, out_fd, in_fd, offset, count);
     }
@@ -1837,7 +1851,7 @@ EXPORT_SYMBOL ssize_t XLIO_SYMBOL(sendfile64)(int out_fd, int in_fd, __off64_t *
     srdr_logfuncall_entry("out_fd=%d, in_fd=%d, offset=%p, *offset=%zu, count=%d", out_fd, in_fd,
                           offset, offset ? *offset : 0, count);
 
-    sockinfo *p_socket_object = fd_collection_get_sockfd(out_fd);
+    ACQUIRE_SOCKET_CALL_OR_RETURN(out_fd, p_socket_object);
     if (!p_socket_object) {
         return SYSCALL(sendfile64, out_fd, in_fd, offset, count);
     }

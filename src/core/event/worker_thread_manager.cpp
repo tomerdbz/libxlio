@@ -55,6 +55,18 @@ void worker_thread_manager::create()
 }
 
 // Static
+void worker_thread_manager::begin_shutdown()
+{
+    if (!s_p_worker_thread_manager || !entity_context_manager::instance()) {
+        return;
+    }
+
+    for (entity_context *context : entity_context_manager::instance()->get_all_contexts()) {
+        context->close_job_admission();
+    }
+}
+
+// Static
 void worker_thread_manager::destroy()
 {
     if (s_p_worker_thread_manager) {
@@ -92,7 +104,10 @@ worker_thread_manager::worker_thread_manager()
 // coverity[UNCAUGHT_EXCEPT]
 worker_thread_manager::~worker_thread_manager()
 {
+    begin_shutdown();
     size_t threads_num = safe_mce_sys().worker_threads;
     std::for_each(m_worker_threads.get(), m_worker_threads.get() + threads_num,
-                  [](worker_thread &t) { t.stop_thread(); });
+                  [](worker_thread &t) { t.request_stop(); });
+    std::for_each(m_worker_threads.get(), m_worker_threads.get() + threads_num,
+                  [](worker_thread &t) { t.join(); });
 }

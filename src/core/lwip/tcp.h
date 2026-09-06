@@ -102,6 +102,20 @@ typedef err_t (*tcp_accept_fn)(void *arg, struct tcp_pcb *newpcb, err_t err);
  */
 typedef err_t (*tcp_syn_handled_fn)(void *arg, struct tcp_pcb *newpcb);
 
+enum tcp_timewait_reuse_phase {
+    TCP_TIMEWAIT_REUSE_CLAIM = 0,
+    TCP_TIMEWAIT_REUSE_COMMIT,
+};
+
+/**
+ * Function prototype for the callback that arbitrates and commits TIME_WAIT PCB reuse.
+ *
+ * CLAIM runs before the PCB is recycled and must not publish the new incarnation.
+ * COMMIT runs after recycling and transfers the PCB to the accepting listener.
+ */
+typedef err_t (*tcp_timewait_handled_fn)(void *arg, struct tcp_pcb *newpcb,
+                                         enum tcp_timewait_reuse_phase phase);
+
 /** Function prototype for tcp clone callback functions. Called to clone listen pcb
  * on connection establishment.
  * @param arg Additional argument to pass to the callback function (@see tcp_arg())
@@ -253,7 +267,7 @@ struct tcp_pcb {
     u32_t rcv_wnd_max_desired;
 
     void *listen_sock;
-    tcp_syn_handled_fn syn_tw_handled_cb;
+    tcp_timewait_handled_fn syn_tw_handled_cb;
 
     /* ports are in host byte order */
     u16_t remote_port;
@@ -269,6 +283,8 @@ struct tcp_pcb {
 #define TF_NAGLEMEMERR                                                                             \
     ((u16_t)0x0080U) /* nagle enabled, memerr, try to output to prevent delayed ACK to happen */
 #define TF_WND_SCALE ((u16_t)0x0100U) /* Window Scale option enabled */
+#define TF_WORKER_PARTIAL_WND_SPLIT                                                                \
+    ((u16_t)0x0200U) /* Worker TX may split fresh zero-copy data to the open window. */
 
     /* the rest of the fields are in host byte order
        as we have to do some math with them */

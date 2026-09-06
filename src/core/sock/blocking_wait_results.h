@@ -21,8 +21,9 @@ struct rx_sleep_wait_outcome {
     int err;
 };
 
-// Data before terminal. No RX bytes -> EAGAIN; handle_rx_error() maps FIN/RST/exit.
-inline rx_sleep_wait_outcome map_rx_sleep_wait_result(blocking_wait::result r, bool has_rx_data)
+// Threshold before terminal. Below threshold -> EAGAIN; handle_rx_error() maps FIN/RST/exit.
+inline rx_sleep_wait_outcome map_rx_sleep_wait_result(blocking_wait::result r,
+                                                      bool threshold_satisfied)
 {
     switch (r) {
     case blocking_wait::result::TIMEOUT:
@@ -33,7 +34,7 @@ inline rx_sleep_wait_outcome map_rx_sleep_wait_result(blocking_wait::result r, b
     case blocking_wait::result::READY:
         break;
     }
-    if (has_rx_data) {
+    if (threshold_satisfied) {
         return {true, 0};
     }
     return {false, EAGAIN};
@@ -102,12 +103,12 @@ inline connect_wait_outcome map_connect_wait_result(blocking_wait::result r, boo
 }
 
 struct accept_wait_outcome {
-    bool ok; // true -> pop accept queue; false -> accept_helper() returns -1
+    bool ok; // true -> pop accept queue or re-enter helper; false -> accept_helper() returns -1
     int err;
 };
 
 // conn_ready here; accept_helper() post-loop g_b_exit is teardown-wins. exiting before
-// listen_closed. TIMEOUT is unreachable today (caller passes -1).
+// listen_closed. READY-none is the shadow-listener wake: fail-open so the helper OS-polls.
 inline accept_wait_outcome map_accept_wait_result(blocking_wait::result r, bool conn_ready,
                                                   bool exiting, bool listen_closed)
 {

@@ -50,6 +50,7 @@
 void worker_thread::worker_thread_main(worker_thread &t, entity_context *ctx)
 {
     t.m_entity_ctx = ctx;
+    entity_context::set_executing_thread_context(ctx);
 
     t.worker_thread_loop();
 }
@@ -65,12 +66,16 @@ void worker_thread::start_thread(entity_context *ctx)
     wt_logdbg("Worker Thread started (tid: %d, entctx: %p)", gettid(), ctx);
 }
 
-void worker_thread::stop_thread()
+void worker_thread::request_stop()
 {
-    m_running.store(false);
+    m_stop_requested.store(true, std::memory_order_release);
     if (m_entity_ctx) {
         m_entity_ctx->wakeup();
     }
+}
+
+void worker_thread::join()
+{
     m_thread.join();
     wt_logdbg("Worker Thread terminated (tid: %d, entctx: %p)", gettid(), m_entity_ctx);
 }
@@ -82,19 +87,19 @@ void worker_thread::worker_thread_loop()
     const int32_t poll_budget_us = safe_mce_sys().select_poll_num;
     const bool interrupt_enabled = (poll_budget_us >= 0);
 
-    // TODO: Keep timestamp in entity_context::process() and use in the loop to check for the idle threshold.
+    // TODO: Keep timestamp in entity_context::process() and use in the loop to check for the idle
+    // threshold.
     m_running.store(true);
-    while (m_running.load(std::memory_order_relaxed)) {
+    while (!m_stop_requested.load(std::memory_order_acquire)) {
         if (!interrupt_enabled) {
             m_entity_ctx->process();
             continue;
         }
 
         auto poll_start = clock::now();
-        auto poll_deadline =
-            poll_start + std::chrono::microseconds(poll_budget_us);
+        auto poll_deadline = poll_start + std::chrono::microseconds(poll_budget_us);
 
-        while (m_running.load(std::memory_order_relaxed)) {
+        while (!m_stop_requested.load(std::memory_order_acquire)) {
             m_entity_ctx->process();
 
             if (clock::now() >= poll_deadline) {
@@ -102,7 +107,7 @@ void worker_thread::worker_thread_loop()
             }
         }
 
-        if (!m_running.load(std::memory_order_relaxed)) {
+        if (m_stop_requested.load(std::memory_order_acquire)) {
             break;
         }
 
@@ -112,4 +117,15 @@ void worker_thread::worker_thread_loop()
         static constexpr int INTERRUPT_TIMEOUT_MS = 100;
         m_entity_ctx->wait_for_interrupt(INTERRUPT_TIMEOUT_MS);
     }
+
+    do {
+        m_entity_ctx->process();
+    } while (m_entity_ctx->has_unsettled_work());
+
+    do {
+        m_entity_ctx->drain_worker_sockets_for_shutdown();
+        m_entity_ctx->process();
+    } while (m_entity_ctx->has_unsettled_work() || m_entity_ctx->has_owned_sockets());
+
+    m_running.store(false, std::memory_order_release);
 }

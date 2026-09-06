@@ -78,8 +78,12 @@ private:
 
     std::vector<sockinfo_tcp *> m_dirty_sockets;
     std::vector<std::pair<enum poll_group_socket_op, sockinfo_tcp *>> m_slow_path_sockets;
+
+protected:
     std::list<sockinfo_tcp *> m_pending_to_remove_lst;
     sockinfo_list_t m_sockets_list;
+
+private:
     std::vector<std::pair<std::unique_ptr<ring_alloc_logic_attr>, net_device_val *>> m_rings_ref;
 };
 

@@ -33,6 +33,8 @@
  */
 
 #include "entity_context_manager.h"
+#include <algorithm>
+
 #include "util/sys_vars.h"
 #include "sock/sockinfo_tcp.h"
 
@@ -85,29 +87,90 @@ entity_context_manager::~entity_context_manager()
                   [](entity_context *ctx) { delete ctx; });
 }
 
-void entity_context_manager::distribute_socket(sockinfo *si, entity_context::job_type jobtype)
+entity_context::job_submit_result entity_context_manager::socket_job_reservation::commit(
+    sockinfo *si, entity_context::job_type jobtype)
 {
-    uint16_t next_idx = m_next_distribute.fetch_add(1U) % safe_mce_sys().worker_threads;
-    // Publish owner before post so a racing close() takes JOB_TYPE_SOCK_CLOSE, not sync free.
-    si->publish_entity_context_owner(m_entity_contexts[next_idx]);
+    if (!m_context || !m_reservation) {
+        return m_reservation.result();
+    }
+
+    if (si->get_protocol() == PROTO_TCP) {
+        sockinfo_tcp *tcp_sock = static_cast<sockinfo_tcp *>(si);
+        tcp_sock->set_worker_retire_owner(m_context);
+    }
+    si->publish_entity_context_owner(m_context);
+
     // Snapshot is_blocking() under connect()'s socket lock. connect_socket_job must not reread
     // a live fcntl(O_NONBLOCK) flip.
-    m_entity_contexts[next_idx]->add_job(entity_context::job_desc {
+    const entity_context::job_submit_result result = m_reservation.commit(entity_context::job_desc {
         jobtype, si->is_blocking() ? entity_context::JOB_FLAG_SOCK_BLOCKING : 0, si, nullptr, 0U,
         0U});
+    if (result != entity_context::job_submit_result::ACCEPTED) {
+        si->publish_entity_context_owner(nullptr);
+        if (si->get_protocol() == PROTO_TCP) {
+            static_cast<sockinfo_tcp *>(si)->set_worker_retire_owner(nullptr);
+        }
+    }
+    return result;
 }
 
-void entity_context_manager::distribute_listen_socket(sockinfo_tcp *si)
+entity_context_manager::socket_job_reservation entity_context_manager::reserve_socket_job(
+    sockinfo *si)
 {
-    for (size_t i = 0; i < safe_mce_sys().worker_threads &&
-         i < si->get_listen_context()->get_listen_rss_children_size();
-         ++i) {
+    const uint16_t next_idx =
+        m_next_distribute.fetch_add(1U, std::memory_order_relaxed) % safe_mce_sys().worker_threads;
+    entity_context *context = m_entity_contexts[next_idx];
+    if (si->get_protocol() == PROTO_TCP) {
+        sockinfo_tcp *tcp_sock = static_cast<sockinfo_tcp *>(si);
+        assert(tcp_sock->is_worker_posix_managed());
+        if (!tcp_sock->is_worker_posix_managed()) {
+            return {};
+        }
+    }
+    return socket_job_reservation(context, context->reserve_job(si));
+}
+
+bool entity_context_manager::distribute_listen_socket(sockinfo_tcp *si)
+{
+    const size_t child_count = std::min(static_cast<size_t>(safe_mce_sys().worker_threads),
+                                        si->get_listen_context()->get_listen_rss_children_size());
+    std::vector<entity_context::job_reservation> reservations;
+    try {
+        reservations.reserve(child_count);
+        for (size_t i = 0; i < child_count; ++i) {
+            sockinfo_tcp *child = si->get_listen_context()->get_listen_rss_child(i);
+            if (!child->enable_worker_posix_lifetime()) {
+                return false;
+            }
+            entity_context::job_reservation reservation = m_entity_contexts[i]->reserve_job(child);
+            if (!reservation) {
+                return false;
+            }
+            reservations.push_back(std::move(reservation));
+        }
+    } catch (...) {
+        return false;
+    }
+
+    assert(si->is_worker_posix_managed());
+    if (!si->is_worker_posix_managed()) {
+        return false;
+    }
+    si->set_worker_retire_owner(m_entity_contexts.front());
+    for (size_t i = 0; i < child_count; ++i) {
         sockinfo_tcp *listen_rss_child = si->get_listen_context()->get_listen_rss_child(i);
+        listen_rss_child->set_worker_retire_owner(m_entity_contexts[i]);
         listen_rss_child->get_listen_context()->set_steering_index(i);
         listen_rss_child->publish_entity_context_owner(m_entity_contexts[i]);
-        m_entity_contexts[i]->add_job(entity_context::job_desc {
-            entity_context::JOB_TYPE_SOCK_ADD_AND_LISTEN, 0, listen_rss_child, nullptr, 0U, 0U});
+        const entity_context::job_submit_result result = reservations[i].commit(
+            entity_context::job_desc {entity_context::JOB_TYPE_SOCK_ADD_AND_LISTEN, 0,
+                                      listen_rss_child, nullptr, 0U, 0U});
+        // A valid reservation owns its queue node, and commit is allocation-free and nothrow.
+        // Returning after an earlier child was published would make rollback ownership ambiguous.
+        assert(result == entity_context::job_submit_result::ACCEPTED);
+        (void)result;
     }
+    return true;
 }
 
 int entity_context_manager::calculate_entity_context_pow2()

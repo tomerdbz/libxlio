@@ -5,6 +5,7 @@
  */
 
 #include <sock/fd_collection.h>
+#include <sock/sockinfo_tcp.h>
 #include <iomux/epfd_info.h>
 #include "event/entity_context.h"
 
@@ -44,8 +45,7 @@ epfd_info::epfd_info(int epfd, int size)
 
     m_ready_fds.set_id("epfd_info (%p) : m_ready_fds", this);
 
-    m_p_offloaded_fds = new int[m_size];
-    m_n_offloaded_fds = 0;
+    m_offloaded_registry.reset(static_cast<size_t>(m_size));
 
     memset(&(m_local_stats.stats), 0, sizeof(m_local_stats.stats));
 
@@ -96,8 +96,8 @@ epfd_info::~epfd_info()
         sock_fd->m_fd_rec.reset();
     }
 
-    for (int i = 0; i < m_n_offloaded_fds; i++) {
-        sock_fd = fd_collection_get_sockfd(m_p_offloaded_fds[i]);
+    for (int i = 0; i < m_offloaded_registry.count(); i++) {
+        sock_fd = fd_collection_get_sockfd(m_offloaded_registry.fds()[i]);
         BULLSEYE_EXCLUDE_BLOCK_START
         if (sock_fd) {
             unlock();
@@ -117,7 +117,6 @@ epfd_info::~epfd_info()
     unlock();
 
     xlio_stats_instance_remove_epoll_block(&m_stats->stats);
-    delete[] m_p_offloaded_fds;
 }
 
 int epfd_info::ctl(int op, int fd, epoll_event *event)
@@ -157,8 +156,8 @@ int epfd_info::ctl(int op, int fd, epoll_event *event)
 void epfd_info::get_offloaded_fds_arr_and_size(int **p_p_num_offloaded_fds,
                                                int **p_p_offloadded_fds)
 {
-    *p_p_num_offloaded_fds = &m_n_offloaded_fds;
-    *p_p_offloadded_fds = m_p_offloaded_fds;
+    *p_p_num_offloaded_fds = m_offloaded_registry.count_ptr();
+    *p_p_offloadded_fds = m_offloaded_registry.fds();
 }
 
 bool epfd_info::is_cq_fd(uint64_t data)
@@ -229,7 +228,7 @@ int epfd_info::add_fd(int fd, epoll_event *event)
     fd_rec.epdata = event->data;
 
     if (is_offloaded) { // TODO: do we need to handle offloading only for one of read/write?
-        if (m_n_offloaded_fds >= m_size) {
+        if (m_offloaded_registry.count() >= m_size) {
             __log_dbg("Reached max fds for epoll (%d)", m_size);
             errno = ENOMEM;
             return -1;
@@ -263,11 +262,32 @@ int epfd_info::add_fd(int fd, epoll_event *event)
             return ret;
         }
 
-        m_p_offloaded_fds[m_n_offloaded_fds] = fd;
-        ++m_n_offloaded_fds;
+        sockinfo *worker_socket = nullptr;
+        if (safe_mce_sys().is_threads_mode() && temp_sock_fd_api->get_protocol() == PROTO_TCP &&
+            !static_cast<sockinfo_tcp *>(temp_sock_fd_api)->is_xlio_socket()) {
+            /*
+             * A POSIX socket can be registered before connect() or listen() assigns its worker.
+             * Cache worker-mode candidates so later feature-owned close cleanup still has the
+             * exact identity after fd-map admission is cleared. Generic paths never consume it.
+             */
+            worker_socket = temp_sock_fd_api;
+        }
+        const bool appended = m_offloaded_registry.append(fd, worker_socket);
+        if (!appended) {
+            unlock();
+            m_ring_map_lock.lock();
+            temp_sock_fd_api->remove_epoll_context(this);
+            m_ring_map_lock.unlock();
+            lock();
+            if (!temp_sock_fd_api->skip_os_select()) {
+                remove_fd_from_epoll_os(fd);
+            }
+            errno = ENOMEM;
+            return -1;
+        }
 
         m_fd_offloaded_list.push_back(temp_sock_fd_api);
-        fd_rec.offloaded_index = m_n_offloaded_fds;
+        fd_rec.offloaded_index = m_offloaded_registry.count();
         temp_sock_fd_api->m_fd_rec = fd_rec;
 
         // if the socket is ready, add it to ready events
@@ -404,19 +424,22 @@ void epfd_info::rx_migration_check()
  * 2. passthrough - remove the fd as offloaded fd, and keep it only on OS epfd if it was there.
  *    this is a 1 way direction from both offloaded/not-offloaded to not-offloaded only.
  */
-int epfd_info::del_fd(int fd, bool passthrough)
+int epfd_info::del_fd(int fd, bool passthrough, sockinfo *expected_socket)
 {
     __log_funcall("fd=%d", fd);
 
     epoll_fd_rec *fi;
-    sockinfo *temp_sock_fd_api = fd_collection_get_sockfd(fd);
+    // Worker close atomically removes fd-map admission before epoll cleanup, but it carries a
+    // lifetime-pinned expected socket through this call. All ordinary epoll_ctl paths keep the
+    // legacy fd-map lookup.
+    sockinfo *temp_sock_fd_api = expected_socket ? expected_socket : fd_collection_get_sockfd(fd);
     if (temp_sock_fd_api && temp_sock_fd_api->skip_os_select()) {
         __log_dbg("fd=%d must be skipped from os epoll()", fd);
     } else if (!passthrough) {
         remove_fd_from_epoll_os(fd);
     }
 
-    fi = get_fd_rec(fd);
+    fi = get_fd_rec(fd, expected_socket);
     if (!fi) {
         errno = ENOENT;
         return -1;
@@ -444,24 +467,34 @@ int epfd_info::del_fd(int fd, bool passthrough)
 
         remove_socket_from_ready_list(temp_sock_fd_api);
 
-        // check if the index of fd, which is being removed, is the last one.
-        // if does, it is enough to decrease the val of m_n_offloaded_fds in order
-        // to shrink the offloaded fds array.
-        if (fi->offloaded_index < m_n_offloaded_fds) {
-            // remove fd and replace by last fd
-            m_p_offloaded_fds[fi->offloaded_index - 1] = m_p_offloaded_fds[m_n_offloaded_fds - 1];
+        assert(!expected_socket ||
+               m_offloaded_registry.socket_at(static_cast<size_t>(fi->offloaded_index - 1)) ==
+                   temp_sock_fd_api);
+        epoll_offloaded_registry::erase_result erased =
+            m_offloaded_registry.erase(fi->offloaded_index);
+        if (erased.moved_fd >= 0) {
+            sockinfo *last_socket = fd_collection_get_sockfd(erased.moved_fd);
 
-            sockinfo *last_socket =
-                fd_collection_get_sockfd(m_p_offloaded_fds[m_n_offloaded_fds - 1]);
-            if (last_socket && last_socket->get_epoll_context_fd() == m_epfd) {
-                last_socket->m_fd_rec.offloaded_index = fi->offloaded_index;
+            /*
+             * A worker close clears fd-map admission before epoll cleanup. If another worker
+             * close already cleared the displaced fd too, its feature-owned retirement reference
+             * keeps this epoll-local identity alive until its own cleanup consumes the new index.
+             * Generic paths retain the legacy fd-map resolution and never use the cached pointer.
+             */
+            if (!last_socket && expected_socket && erased.moved_worker_owned) {
+                last_socket = erased.moved_socket;
+            }
+
+            const bool identity_matches =
+                !expected_socket || !erased.moved_socket || last_socket == erased.moved_socket;
+            if (last_socket && identity_matches && last_socket->get_epoll_context_fd() == m_epfd) {
+                last_socket->m_fd_rec.offloaded_index = erased.moved_index;
             } else {
                 __log_warn("Failed to update the index of offloaded fd: %d last_socket %p",
-                           m_p_offloaded_fds[m_n_offloaded_fds - 1], last_socket);
+                           erased.moved_fd, last_socket);
             }
         }
 
-        --m_n_offloaded_fds;
         fi->reset();
     } else {
         fd_info_map_t::iterator fd_iter = m_fd_non_offloaded_map.find(fd);
@@ -547,10 +580,10 @@ int epfd_info::mod_fd(int fd, epoll_event *event)
     return 0;
 }
 
-epoll_fd_rec *epfd_info::get_fd_rec(int fd)
+epoll_fd_rec *epfd_info::get_fd_rec(int fd, sockinfo *expected_socket)
 {
     epoll_fd_rec *fd_rec = nullptr;
-    sockinfo *temp_sock_fd_api = fd_collection_get_sockfd(fd);
+    sockinfo *temp_sock_fd_api = expected_socket ? expected_socket : fd_collection_get_sockfd(fd);
     lock();
 
     if (temp_sock_fd_api && temp_sock_fd_api->get_epoll_context_fd() == m_epfd) {
@@ -566,11 +599,11 @@ epoll_fd_rec *epfd_info::get_fd_rec(int fd)
     return fd_rec;
 }
 
-void epfd_info::fd_closed(int fd, bool passthrough)
+void epfd_info::fd_closed(int fd, bool passthrough, sockinfo *expected_socket)
 {
     lock();
-    if (get_fd_rec(fd)) {
-        del_fd(fd, passthrough);
+    if (get_fd_rec(fd, expected_socket)) {
+        del_fd(fd, passthrough, expected_socket);
     }
     unlock();
 }
@@ -763,15 +796,16 @@ void epfd_info::statistics_print(vlog_levels_t log_level /* = VLOG_DEBUG */)
     vlog_printf(log_level, "Fd number : %d\n", m_epfd);
     vlog_printf(log_level, "Size : %d\n", m_size);
 
-    vlog_printf(log_level, "Offloaded Fds : %d\n", m_n_offloaded_fds);
+    vlog_printf(log_level, "Offloaded Fds : %d\n", m_offloaded_registry.count());
 
-    while (i < m_n_offloaded_fds) {
+    while (i < m_offloaded_registry.count()) {
         memset(offloaded_str, 0, sizeof(offloaded_str));
         for (offloaded_str_place = 0;
-             offloaded_str_place < EPFD_MAX_OFFLOADED_STR && i < m_n_offloaded_fds; i++) {
+             offloaded_str_place < EPFD_MAX_OFFLOADED_STR && i < m_offloaded_registry.count();
+             i++) {
             int n = snprintf(&offloaded_str[offloaded_str_place],
                              sizeof(offloaded_str) - offloaded_str_place - 1, " %d",
-                             m_p_offloaded_fds[i]);
+                             m_offloaded_registry.fds()[i]);
             if (!likely((0 < n) && (n < (int)(sizeof(offloaded_str) - offloaded_str_place - 1)))) {
                 break;
             }

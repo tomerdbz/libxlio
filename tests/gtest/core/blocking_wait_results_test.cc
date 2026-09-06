@@ -17,35 +17,39 @@ using result = blocking_wait::result;
 
 TEST(rx_sleep_wait_result, ready_with_data_returns_one_no_eagain)
 {
-    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::READY, /*has_rx_data=*/true);
+    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::READY, /*threshold_satisfied=*/true);
     EXPECT_TRUE(o.proceed);
     EXPECT_EQ(0, o.err);
 }
 
-TEST(rx_sleep_wait_result, ready_no_data_returns_eagain)
+TEST(rx_sleep_wait_result, ready_below_threshold_returns_eagain)
 {
-    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::READY, /*has_rx_data=*/false);
+    rx_sleep_wait_outcome o =
+        map_rx_sleep_wait_result(result::READY, /*threshold_satisfied=*/false);
     EXPECT_FALSE(o.proceed);
     EXPECT_EQ(EAGAIN, o.err);
 }
 
 TEST(rx_sleep_wait_result, timeout_returns_eagain)
 {
-    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::TIMEOUT, /*has_rx_data=*/false);
+    rx_sleep_wait_outcome o =
+        map_rx_sleep_wait_result(result::TIMEOUT, /*threshold_satisfied=*/false);
     EXPECT_FALSE(o.proceed);
     EXPECT_EQ(EAGAIN, o.err);
 }
 
 TEST(rx_sleep_wait_result, interrupted_returns_error_preserving_errno)
 {
-    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::INTERRUPTED, /*has_rx_data=*/false);
+    rx_sleep_wait_outcome o =
+        map_rx_sleep_wait_result(result::INTERRUPTED, /*threshold_satisfied=*/false);
     EXPECT_FALSE(o.proceed);
     EXPECT_EQ(0, o.err);
 }
 
 TEST(rx_sleep_wait_result, error_returns_error_preserving_errno)
 {
-    rx_sleep_wait_outcome o = map_rx_sleep_wait_result(result::ERROR, /*has_rx_data=*/false);
+    rx_sleep_wait_outcome o =
+        map_rx_sleep_wait_result(result::ERROR, /*threshold_satisfied=*/false);
     EXPECT_FALSE(o.proceed);
     EXPECT_EQ(0, o.err);
 }
@@ -105,8 +109,7 @@ TEST(tx_wait_result, error_returns_error_preserving_errno)
 TEST(connect_wait_result, ready_connected_returns_success_no_errno)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/true,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/false, /*exiting=*/false);
     EXPECT_TRUE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -114,8 +117,7 @@ TEST(connect_wait_result, ready_connected_returns_success_no_errno)
 TEST(connect_wait_result, ready_connected_wins_over_exit)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/true,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/true);
+                                                     /*timed_out=*/false, /*exiting=*/true);
     EXPECT_TRUE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -123,8 +125,7 @@ TEST(connect_wait_result, ready_connected_wins_over_exit)
 TEST(connect_wait_result, ready_exiting_returns_eintr)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/true);
+                                                     /*timed_out=*/false, /*exiting=*/true);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(EINTR, o.err);
 }
@@ -132,8 +133,7 @@ TEST(connect_wait_result, ready_exiting_returns_eintr)
 TEST(connect_wait_result, ready_exit_priority_over_terminal)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/true,
-                                                     /*exiting=*/true);
+                                                     /*timed_out=*/true, /*exiting=*/true);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(EINTR, o.err);
 }
@@ -141,8 +141,7 @@ TEST(connect_wait_result, ready_exit_priority_over_terminal)
 TEST(connect_wait_result, ready_timed_out_returns_etimedout)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/true,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/true, /*exiting=*/false);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(ETIMEDOUT, o.err);
 }
@@ -150,8 +149,7 @@ TEST(connect_wait_result, ready_timed_out_returns_etimedout)
 TEST(connect_wait_result, ready_refused_returns_econnrefused)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/false, /*exiting=*/false);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(ECONNREFUSED, o.err);
 }
@@ -160,8 +158,7 @@ TEST(connect_wait_result, ready_refused_returns_econnrefused)
 TEST(connect_wait_result, timeout_returns_etimedout)
 {
     connect_wait_outcome o = map_connect_wait_result(result::TIMEOUT, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/false, /*exiting=*/false);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(ETIMEDOUT, o.err);
 }
@@ -169,8 +166,7 @@ TEST(connect_wait_result, timeout_returns_etimedout)
 TEST(connect_wait_result, interrupted_returns_error_preserving_errno)
 {
     connect_wait_outcome o = map_connect_wait_result(result::INTERRUPTED, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/false, /*exiting=*/false);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -178,8 +174,7 @@ TEST(connect_wait_result, interrupted_returns_error_preserving_errno)
 TEST(connect_wait_result, error_returns_error_preserving_errno)
 {
     connect_wait_outcome o = map_connect_wait_result(result::ERROR, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false);
+                                                     /*timed_out=*/false, /*exiting=*/false);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -187,8 +182,8 @@ TEST(connect_wait_result, error_returns_error_preserving_errno)
 TEST(connect_wait_result, ready_passthrough_returns_minus_one_no_errno)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false, /*passthrough=*/true);
+                                                     /*timed_out=*/false, /*exiting=*/false,
+                                                     /*passthrough=*/true);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -196,8 +191,8 @@ TEST(connect_wait_result, ready_passthrough_returns_minus_one_no_errno)
 TEST(connect_wait_result, ready_connected_wins_over_passthrough)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/true,
-                                                     /*timed_out=*/false,
-                                                     /*exiting=*/false, /*passthrough=*/true);
+                                                     /*timed_out=*/false, /*exiting=*/false,
+                                                     /*passthrough=*/true);
     EXPECT_TRUE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -206,8 +201,8 @@ TEST(connect_wait_result, ready_connected_wins_over_passthrough)
 TEST(connect_wait_result, ready_passthrough_wins_over_terminal_and_exit)
 {
     connect_wait_outcome o = map_connect_wait_result(result::READY, /*connected=*/false,
-                                                     /*timed_out=*/true,
-                                                     /*exiting=*/true, /*passthrough=*/true);
+                                                     /*timed_out=*/true, /*exiting=*/true,
+                                                     /*passthrough=*/true);
     EXPECT_FALSE(o.ok);
     EXPECT_EQ(0, o.err);
 }
@@ -253,8 +248,8 @@ TEST(accept_wait_result, ready_listen_closed_returns_einval)
     EXPECT_EQ(EINVAL, o.err);
 }
 
-// Pred should not produce this. Fail-open so accept_helper re-enters the wait loop.
-TEST(accept_wait_result, ready_none_defensive_returns_success)
+// Shadow-listener wake: fail-open so accept_helper OS-polls and re-enters.
+TEST(accept_wait_result, ready_shadow_listener_wake_returns_control)
 {
     accept_wait_outcome o = map_accept_wait_result(result::READY, /*conn_ready=*/false,
                                                    /*exiting=*/false, /*listen_closed=*/false);
@@ -262,7 +257,6 @@ TEST(accept_wait_result, ready_none_defensive_returns_success)
     EXPECT_EQ(0, o.err);
 }
 
-// Caller passes -1 today. Mapping for when a deadline exists.
 TEST(accept_wait_result, timeout_returns_eagain)
 {
     accept_wait_outcome o = map_accept_wait_result(result::TIMEOUT, /*conn_ready=*/false,

@@ -46,6 +46,7 @@ public:
 
     static worker_thread_manager *instance();
     static void create();
+    static void begin_shutdown();
     static void destroy();
     static void fork_nullify();
 

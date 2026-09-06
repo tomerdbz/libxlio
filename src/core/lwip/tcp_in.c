@@ -413,7 +413,7 @@ static err_t tcp_pcb_reuse(struct tcp_pcb *pcb, tcp_in_data *in_data)
 
     // mss can be changed by tcp_parseopt, need to take the MIN
     pcb->mss = LWIP_MIN(pcb->mss, pcb->advtsd_mss);
-    rc = pcb->syn_tw_handled_cb(pcb->listen_sock, pcb);
+    rc = pcb->syn_tw_handled_cb(pcb->listen_sock, pcb, TCP_TIMEWAIT_REUSE_COMMIT);
     if (rc != ERR_OK) {
         return rc;
     }
@@ -468,6 +468,10 @@ static err_t tcp_timewait_input(struct tcp_pcb *pcb, tcp_in_data *in_data)
         reusable = TCP_SEQ_GEQ(in_data->seqno, pcb->rcv_nxt);
 #endif
         reusable &= (pcb->syn_tw_handled_cb != NULL);
+        if (reusable) {
+            reusable =
+                pcb->syn_tw_handled_cb(pcb->listen_sock, pcb, TCP_TIMEWAIT_REUSE_CLAIM) == ERR_OK;
+        }
         if (reusable) {
             return tcp_pcb_reuse(pcb, in_data);
         } else {

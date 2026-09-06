@@ -83,7 +83,17 @@ public:
 
             waiter.arm();
             lock.unlock();
-            const int r = waiter.block(slice_ms);
+            int r;
+            try {
+                r = waiter.block(slice_ms);
+            } catch (...) {
+                // pthread cancellation unwinds through C++ as a forced-unwind exception.
+                // Restore the wait protocol before rethrowing so the caller regains the lock
+                // and the waiter cannot remain armed after any block() exception.
+                lock.lock();
+                waiter.disarm();
+                throw;
+            }
             lock.lock();
             waiter.disarm();
 

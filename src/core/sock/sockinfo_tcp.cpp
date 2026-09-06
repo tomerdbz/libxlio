@@ -5,6 +5,7 @@
  */
 
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <stdio.h>
 #include <sys/time.h>
@@ -22,6 +23,7 @@
 #include "util/blocking_wait.h"
 #include "util/blocking_wait_sock.h"
 #include "sock/blocking_wait_results.h"
+#include "sock/worker_shutdown_result.h"
 #include "event/event_handler_manager.h"
 #include "event/event_handler_manager_local.h"
 #include "event/poll_group.h"
@@ -33,6 +35,7 @@
 #include "fd_collection.h"
 #include "sockinfo_tcp.h"
 #include "sockinfo_tcp_listen_context.h"
+#include "worker_rx_ready_metadata.h"
 #include "bind_no_port.h"
 #include "xlio.h"
 #include "event/entity_context_manager.h"
@@ -64,6 +67,116 @@ thread_local thread_local_tcp_timers g_thread_local_tcp_timers;
 bind_no_port *g_bind_no_port = nullptr;
 
 static padded_lock_dummy g_lock_dummy_socket;
+
+bool sockinfo_tcp::enable_worker_posix_lifetime() noexcept
+{
+    if (m_worker_state) {
+        return true;
+    }
+
+    if (is_xlio_socket()) {
+        return false;
+    }
+
+    m_worker_state.reset(new (std::nothrow) worker_socket_state());
+    return m_worker_state != nullptr;
+}
+
+bool sockinfo_tcp::try_acquire_worker_call_ref()
+{
+    return is_worker_posix_managed() && worker_state().m_lifetime.try_acquire();
+}
+
+bool sockinfo_tcp::try_acquire_worker_job_ref()
+{
+    return is_worker_posix_managed() && worker_state().m_lifetime.try_acquire_existing();
+}
+
+void sockinfo_tcp::release_worker_ref()
+{
+    bool destroy = false;
+    lock_tcp_con();
+    worker_socket_state &worker = worker_state();
+    if (worker.m_lifetime.release() == worker_lifetime_release::RECHECK_RETIREMENT) {
+        if (worker.m_retire_owner) {
+            const bool posted = worker.m_retire_owner->post_socket_control_locked(
+                this, entity_context::SOCKET_CONTROL_RETIRE_RECHECK);
+            assert(posted);
+            (void)posted;
+        } else if (worker.m_close_processed && is_closable()) {
+            destroy = worker.m_lifetime.try_claim_destruction_without_ref();
+        }
+    }
+    unlock_tcp_con();
+
+    if (destroy) {
+        // The destruction claim was taken on the no-retire-owner branch above.
+        entity_context::complete_worker_socket_destroy(nullptr, this);
+    }
+}
+
+void sockinfo_tcp::wakeup_worker_blocking_waiters()
+{
+    // The same TCP lock serializes every worker wait predicate plus arm operation, so a wake
+    // posted here cannot land in the check-to-sleep window.
+    lock_tcp_con();
+    m_sock_wakeup_pipe.do_wakeup();
+    unlock_tcp_con();
+}
+
+bool sockinfo_tcp::begin_worker_retirement()
+{
+    return is_worker_posix_managed() && worker_state().m_lifetime.begin_retirement_with_owner_ref();
+}
+
+sockinfo_tcp::worker_rx_call_guard::~worker_rx_call_guard() noexcept
+{
+    if (m_active) {
+        m_sock.end_worker_rx_call();
+    }
+}
+
+bool sockinfo_tcp::worker_rx_call_guard::enter()
+{
+    if (!m_sock.is_worker_posix_managed()) {
+        return true;
+    }
+
+    m_active = m_sock.begin_worker_rx_call();
+    return m_active;
+}
+
+bool sockinfo_tcp::begin_worker_rx_call()
+{
+    lock_tcp_con();
+    const bool entered = worker_state().m_rx_close_barrier.try_enter(worker_lifecycle() ==
+                                                                     worker_socket_lifecycle::OPEN);
+    unlock_tcp_con();
+    return entered;
+}
+
+void sockinfo_tcp::end_worker_rx_call() noexcept
+{
+    lock_tcp_con();
+    const bool resume_close = worker_state().m_rx_close_barrier.leave();
+    if (worker_lifecycle() != worker_socket_lifecycle::OPEN && worker_state().m_control_queued) {
+        // The receive completion job was committed before the guard reached this point, but the
+        // control node entered the queue earlier, so FIFO position alone cannot order a
+        // destructive close after that job. This covers every retirement-observing departure,
+        // including the interval where the control was dequeued but has not acquired this TCP
+        // lock yet. A control posted or resumed after this departure appends behind the
+        // completion job and needs no flag; a parked control is re-appended by the resume below.
+        worker_state().m_control_republish = true;
+    }
+    if (resume_close) {
+        entity_context *owner = worker_state().m_retire_owner;
+        assert(owner);
+        if (owner) {
+            owner->resume_parked_socket_control_locked(this);
+        }
+    }
+    unlock_tcp_con();
+}
 
 /*
  * The following socket options are inherited by a connected TCP socket from the listening socket:
@@ -428,7 +541,16 @@ void sockinfo_tcp::set_xlio_socket(const struct xlio_socket_attr *attr)
 
 void sockinfo_tcp::set_entity_context(entity_context *ctx)
 {
+    const bool worker_state_ready = enable_worker_posix_lifetime();
+    assert(worker_state_ready);
+    if (!worker_state_ready) {
+        return;
+    }
+    // Worker TX queues large zero-copy segments independently of TCP window changes.
+    // Allow tcp_output() to split only fresh worker data to the currently open window.
+    m_pcb.flags |= TF_WORKER_PARTIAL_WND_SPLIT;
     m_entity_context = ctx;
+    worker_state().m_retire_owner = ctx;
     // To reuse Ultra API path, TX completions for instance
     m_p_group = ctx;
 
@@ -482,15 +604,20 @@ void sockinfo_tcp::listen_entity_context()
 
 int sockinfo_tcp::harvest_sockinfo_tcp_listen_objects()
 {
-    assert(m_listen_ctx->get_listen_rss_children_size() == safe_mce_sys().worker_threads);
-
-    size_t num_rss_children = m_listen_ctx->get_listen_rss_children_size();
+    auto rss_children = m_listen_ctx->acquire_published_listen_rss_children();
+    const size_t num_rss_children = rss_children.size();
+    if (num_rss_children == 0U) {
+        errno = EAGAIN;
+        return -1;
+    }
+    assert(num_rss_children == safe_mce_sys().worker_threads);
 
     // Try to harvest from rss_children using round-robin
     for (size_t i = 0; i < num_rss_children; ++i) {
         size_t rss_child_index = m_listen_ctx->increment_round_robin_index() % num_rss_children;
+        sockinfo_tcp *rss_child = rss_children.get(rss_child_index);
 
-        if (try_harvest_from_rss_child(rss_child_index)) {
+        if (try_harvest_from_rss_child(rss_child, rss_child_index)) {
             return 0; // Success
         }
     }
@@ -500,14 +627,9 @@ int sockinfo_tcp::harvest_sockinfo_tcp_listen_objects()
     return -1;
 }
 
-inline bool sockinfo_tcp::try_harvest_from_rss_child(size_t rss_child_index)
+inline bool sockinfo_tcp::try_harvest_from_rss_child(sockinfo_tcp *rss_child,
+                                                     size_t rss_child_index)
 {
-    sockinfo_tcp *rss_child = m_listen_ctx->get_listen_rss_child(rss_child_index);
-
-    if (rss_child->m_ready_conn_cnt == 0) {
-        return false;
-    }
-
     std::lock_guard<decltype(rss_child->m_tcp_con_lock)> lock(rss_child->m_tcp_con_lock);
 
     if (rss_child->m_ready_conn_cnt == 0) {
@@ -521,6 +643,7 @@ inline bool sockinfo_tcp::try_harvest_from_rss_child(size_t rss_child_index)
     m_accepted_conns.splice_tail(rss_child->m_accepted_conns);
     m_ready_conn_cnt += conn_count;
     rss_child->m_ready_conn_cnt = 0;
+    m_listen_ctx->decrement_ready_connection_count(conn_count);
 
     IF_STATS_O(rss_child,
                rss_child->m_p_socket_stats->listen_counters.n_conn_backlog -= conn_count);
@@ -872,7 +995,16 @@ sockinfo_tcp::~sockinfo_tcp()
     // Clean up listen context if allocated
     destroy_listen_context();
 
+    sockinfo_tcp *timewait_listener =
+        is_worker_posix_managed() ? worker_state().m_timewait_listener : nullptr;
+    if (timewait_listener) {
+        worker_state().m_timewait_listener = nullptr;
+    }
     unlock_tcp_con();
+
+    if (timewait_listener) {
+        timewait_listener->release_worker_ref();
+    }
 
     if (m_n_rx_pkt_ready_list_count || m_rx_ready_byte_count || m_rx_pkt_ready_list.size() ||
         m_rx_ring_map.size() || m_rx_reuse_buff.n_buff_num || m_rx_reuse_buff.rx_reuse.size()) {
@@ -1063,6 +1195,9 @@ bool sockinfo_tcp::prepare_to_close(bool process_shutdown /* = false */)
         // 1. In fd_collection::del_sockfd after this method is done.
         // 2. In handle_close when fd_collection::del_sockfd is finished and we remove the
         //    socket from epfds.
+        if (is_worker_posix_managed()) {
+            assert(worker_lifecycle() == worker_socket_lifecycle::RETIRING);
+        }
         m_pcb.syn_tw_handled_cb = &sockinfo_tcp::syn_received_timewait_cb;
     }
 
@@ -1167,7 +1302,40 @@ bool sockinfo_tcp::prepare_dst_to_send(bool is_accepted_socket /* = false */)
 }
 
 namespace {
-// lock_tcp_con / unlock_tcp_con as wait_until's Lock. RX, TX, connect, accept.
+
+class pthread_cancellation_disable_guard {
+public:
+    pthread_cancellation_disable_guard() = default;
+
+    int disable()
+    {
+        const int rc = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &m_old_state);
+        m_disabled = (rc == 0);
+        return rc;
+    }
+
+    ~pthread_cancellation_disable_guard()
+    {
+        if (m_disabled) {
+            const int rc = pthread_setcancelstate(m_old_state, nullptr);
+            assert(rc == 0);
+            (void)rc;
+        }
+    }
+
+    pthread_cancellation_disable_guard(const pthread_cancellation_disable_guard &) = delete;
+    pthread_cancellation_disable_guard &operator=(const pthread_cancellation_disable_guard &) =
+        delete;
+
+private:
+    int m_old_state = PTHREAD_CANCEL_ENABLE;
+    bool m_disabled = false;
+};
+
+// Tiny adapter presenting the socket lock (lock_tcp_con()/unlock_tcp_con(), a recursive
+// multilock) as the Lock concept blocking_wait::wait_until() drives: entered with the lock
+// held, released around block(), and re-acquired before returning with it still held. Shared by
+// the TX (tx_wait_threads_mode) and RX (rx_sleep_wait_threads_mode) worker-threads sleep paths.
 struct tcp_con_lock_adapter {
     explicit tcp_con_lock_adapter(sockinfo_tcp &sock)
         : m_sock(sock)
@@ -1192,18 +1360,37 @@ unsigned sockinfo_tcp::tx_wait(bool blocking)
 unsigned sockinfo_tcp::tx_wait_threads_mode()
 {
     loops_timer send_timeout(m_loops_timer.get_timeout_msec());
+    return tx_wait_threads_mode(send_timeout);
+}
+
+unsigned sockinfo_tcp::tx_wait_threads_mode(loops_timer &send_timeout)
+{
     const int timeout_ms = send_timeout.time_left_msec();
 
     tcp_con_lock_adapter lock_adapter(*this);
     blocking_wait_sock_waiter waiter(m_sock_wakeup_pipe, m_rx_epfd);
 
     // Terminals (!is_rts, exit) must be in pred: producers wake without sndbuf space.
-    const blocking_wait::result r = blocking_wait::wait_until(
-        lock_adapter, waiter,
-        [this]() { return sndbuf_available() > 0 || g_b_exit || !is_rts(); }, timeout_ms);
+    blocking_wait::result r;
+    try {
+        r = blocking_wait::wait_until(
+            lock_adapter, waiter,
+            [this]() {
+                return sndbuf_available() > 0 ||
+                    g_worker_blocking_exit.load(std::memory_order_acquire) || !is_rts();
+            },
+            timeout_ms);
+    } catch (...) {
+        // wait_until() restores the caller's lock before rethrowing a pthread forced unwind.
+        // This path was entered with a manual lock acquisition, so release that acquisition
+        // before propagation or the canceled thread would exit while owning m_tcp_con_lock.
+        unlock_tcp_con();
+        throw;
+    }
 
     const unsigned sz = sndbuf_available();
-    const tx_wait_outcome outcome = map_tx_wait_result(r, sz > 0, g_b_exit);
+    const bool exiting = g_worker_blocking_exit.load(std::memory_order_acquire);
+    const tx_wait_outcome outcome = map_tx_wait_result(r, sz > 0, exiting);
     if (outcome.err) {
         errno = outcome.err;
     }
@@ -1403,101 +1590,217 @@ ssize_t sockinfo_tcp::tcp_tx_thread(xlio_tx_call_attr_t &tx_arg)
 {
     iovec *p_iov = tx_arg.attr.iov;
     size_t sz_iov = tx_arg.attr.sz_iov;
-    ssize_t sent_bytes = 0;
-    uint32_t store_used = m_store_offset;
-    int errno_tmp = errno;
+    const int errno_tmp = errno;
+    const bool blocking = BLOCK_THIS_RUN(m_b_blocking, tx_arg.attr.flags);
+    loops_timer send_timeout(m_loops_timer.get_timeout_msec());
+    size_t requested = 0U;
 
-    // TODO Flags aren't supported now. They usually affect blocking mode and zerocopy.
+    if (is_invalid_iovec(p_iov, sz_iov)) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (size_t i = 0; i < sz_iov; ++i) {
+        if (SIZE_MAX - requested < p_iov[i].iov_len) {
+            errno = EINVAL;
+            return -1;
+        }
+        requested += p_iov[i].iov_len;
+    }
+    if (requested == 0U) {
+        return 0;
+    }
 
-    /* Note, we do unprotected access to the socket state. State assignment is expected to be
-     * atomic on supported architectures.
-     * In case of false negative, the TX job execution handles it and subsequent send operation
-     * will likely return expected error.
-     */
-    if (!is_rts()) {
-        std::lock_guard<decltype(m_tcp_con_lock)> _lock(m_tcp_con_lock);
-        if (!is_connected_and_ready_to_send()) {
-            stats_update_tx_errors(errno);
+    // One producer owns m_store at a time. The worker consumes only immutable published chunks.
+    // The lock is deliberately released while waiting for credit so concurrent shutdown can
+    // enqueue the state transition that makes the wait predicate terminal.
+    std::unique_lock<decltype(m_lock_snd)> send_lock(m_lock_snd);
+
+    // Complete a buffer when only a tiny unusable tail remains.
+    static constexpr uint32_t store_free_threshold = 64U;
+    size_t committed = 0U;
+    size_t iov_index = 0U;
+    size_t iov_offset = 0U;
+
+    while (committed < requested) {
+        // Serialize the send admission decision with shutdown(), which takes m_lock_snd before
+        // posting its owner-thread state transition. A reset that wins after this check races the
+        // send in the same way it does in R2C; a completed shutdown can never admit new bytes.
+        lock_tcp_con();
+        const bool ready_to_send = is_connected_and_ready_to_send();
+        const int state_error = errno;
+        unlock_tcp_con();
+        if (!ready_to_send) {
+            if (committed > 0U) {
+                errno = errno_tmp;
+                return static_cast<ssize_t>(committed);
+            }
+            stats_update_tx_errors(state_error);
+            errno = state_error;
+            return -1;
+        }
+
+        size_t reserved_credit = 0U;
+        int32_t credit = m_snd_buf.load(std::memory_order_relaxed);
+        while (credit > 0) {
+            const size_t reservation = std::min(requested - committed, static_cast<size_t>(credit));
+            if (m_snd_buf.compare_exchange_weak(credit, credit - static_cast<int32_t>(reservation),
+                                                std::memory_order_acquire,
+                                                std::memory_order_relaxed)) {
+                reserved_credit = reservation;
+                break;
+            }
+        }
+
+        if (reserved_credit == 0U) {
+            if (!blocking) {
+                if (committed > 0U) {
+                    errno = errno_tmp;
+                    return static_cast<ssize_t>(committed);
+                }
+                stats_update_tx_errors(EAGAIN);
+                errno = EAGAIN;
+                return -1;
+            }
+
+            send_lock.unlock();
+            lock_tcp_con();
+            if (!is_connected_and_ready_to_send()) {
+                const int error = errno;
+                unlock_tcp_con();
+                if (committed > 0U) {
+                    errno = errno_tmp;
+                    return static_cast<ssize_t>(committed);
+                }
+                stats_update_tx_errors(error);
+                errno = error;
+                return -1;
+            }
+
+            const unsigned available = tx_wait_threads_mode(send_timeout);
+            if (available == 0U) {
+                int error = errno;
+                if (!is_rts()) {
+                    is_connected_and_ready_to_send();
+                    error = errno;
+                } else if (error == 0) {
+                    error = EAGAIN;
+                }
+                unlock_tcp_con();
+                if (committed > 0U) {
+                    errno = errno_tmp;
+                    return static_cast<ssize_t>(committed);
+                }
+                stats_update_tx_errors(error);
+                errno = error;
+                return -1;
+            }
+            unlock_tcp_con();
+            send_lock.lock();
+            continue;
+        }
+
+        const size_t batch_begin = committed;
+        entity_context::job_submit_result submit_failure =
+            entity_context::job_submit_result::ACCEPTED;
+        bool buffer_allocation_failed = false;
+
+        while (committed - batch_begin < reserved_credit) {
+            while (iov_index < sz_iov && iov_offset == p_iov[iov_index].iov_len) {
+                ++iov_index;
+                iov_offset = 0U;
+            }
+            if (iov_index == sz_iov) {
+                break;
+            }
+
+            entity_context::job_reservation job_slot = m_entity_context->reserve_job(this);
+            if (!job_slot) {
+                submit_failure = job_slot.result();
+                break;
+            }
+
+            if (!m_store) {
+                m_store = m_p_connected_dst_entry->get_tx_buffer();
+                if (unlikely(!m_store)) {
+                    buffer_allocation_failed = true;
+                    break;
+                }
+                m_store_offset = 0U;
+                m_store->p_next_desc = nullptr;
+            }
+
+            uint32_t store_used = m_store_offset;
+            const uint32_t job_offset = m_store_offset;
+            while (committed - batch_begin + (store_used - job_offset) < reserved_credit &&
+                   store_used < m_store->sz_buffer && iov_index < sz_iov) {
+                if (iov_offset == p_iov[iov_index].iov_len) {
+                    ++iov_index;
+                    iov_offset = 0U;
+                    continue;
+                }
+
+                const size_t job_progress = store_used - job_offset;
+                size_t len = std::min(p_iov[iov_index].iov_len - iov_offset,
+                                      static_cast<size_t>(m_store->sz_buffer - store_used));
+                len = std::min(len, reserved_credit - (committed - batch_begin) - job_progress);
+                memcpy(m_store->p_buffer + store_used,
+                       static_cast<uint8_t *>(p_iov[iov_index].iov_base) + iov_offset, len);
+                store_used += static_cast<uint32_t>(len);
+                iov_offset += len;
+            }
+
+            const uint32_t job_size = store_used - job_offset;
+            if (job_size == 0U) {
+                break;
+            }
+            const bool last_chunk = store_used == m_store->sz_buffer ||
+                (m_store->sz_buffer - store_used) <= store_free_threshold;
+            const entity_context::job_submit_result result = job_slot.commit(
+                entity_context::job_desc {entity_context::JOB_TYPE_SOCK_TX,
+                                          last_chunk ? entity_context::JOB_FLAG_TX_LAST_CHUNK : 0,
+                                          this, m_store, job_offset, job_size});
+            if (result != entity_context::job_submit_result::ACCEPTED) {
+                submit_failure = result;
+                break;
+            }
+
+            committed += job_size;
+            m_store_offset = store_used;
+            if (last_chunk) {
+                m_store = nullptr;
+            }
+        }
+
+        const size_t batch_committed = committed - batch_begin;
+        const size_t unused_credit = reserved_credit - batch_committed;
+        if (unused_credit > 0U) {
+            m_snd_buf += static_cast<int32_t>(unused_credit);
+        }
+
+        if (batch_committed < reserved_credit) {
+            if (committed > 0U) {
+                errno = errno_tmp;
+                return static_cast<ssize_t>(committed);
+            }
+
+            int error = EAGAIN;
+            if (submit_failure == entity_context::job_submit_result::NO_MEMORY) {
+                error = ENOMEM;
+            } else if (submit_failure == entity_context::job_submit_result::ADMISSION_CLOSED) {
+                error = g_worker_blocking_exit.load(std::memory_order_acquire) ? EINTR : EBADF;
+            } else if (submit_failure == entity_context::job_submit_result::SOCKET_RETIRED) {
+                error = EPIPE;
+            } else if (!buffer_allocation_failed) {
+                error = EIO;
+            }
+            stats_update_tx_errors(error);
+            errno = error;
             return -1;
         }
     }
 
-    size_t bytes_to_send =
-        std::accumulate(&p_iov[0], &p_iov[sz_iov], 0U,
-                        [](size_t sum, const iovec &curr) { return sum + curr.iov_len; });
-
-    int32_t prev_sndbuf = m_snd_buf.fetch_sub(bytes_to_send);
-    if (prev_sndbuf <= 0) {
-        m_snd_buf += bytes_to_send;
-        goto exit;
-    }
-    if (prev_sndbuf < static_cast<int32_t>(bytes_to_send)) {
-        // TODO Allow to make m_snd_buf negative not to send too small buffers.
-        m_snd_buf += bytes_to_send - prev_sndbuf;
-        bytes_to_send = prev_sndbuf;
-    }
-
-    for (size_t i = 0; i < sz_iov; ++i) {
-        size_t offset = 0;
-        while (offset < p_iov[i].iov_len) {
-            if (!m_store) {
-                m_store = m_p_connected_dst_entry->get_tx_buffer();
-                if (unlikely(!m_store)) {
-                    goto exit;
-                }
-                m_store_offset = 0;
-                store_used = 0;
-                m_store->p_next_desc = nullptr;
-            }
-
-            size_t len = std::min(p_iov[i].iov_len - offset, m_store->sz_buffer - store_used);
-            len = std::min(len, bytes_to_send);
-            memcpy(m_store->p_buffer + store_used, (uint8_t *)p_iov[i].iov_base + offset, len);
-
-            offset += len;
-            store_used += len;
-            sent_bytes += static_cast<ssize_t>(len);
-            bytes_to_send -= len;
-
-            if (store_used == m_store->sz_buffer) {
-                m_entity_context->add_job(entity_context::job_desc {
-                    entity_context::JOB_TYPE_SOCK_TX, entity_context::JOB_FLAG_TX_LAST_CHUNK, this,
-                    m_store, m_store_offset, store_used - m_store_offset});
-                m_store = nullptr;
-            }
-
-            if (bytes_to_send == 0) {
-                goto exit;
-            }
-        }
-    }
-
-exit:
-    if (unlikely(sent_bytes == 0)) {
-        // Only user thread increments the EAGAIN counter, so no need to lock
-        stats_update_tx_errors(EAGAIN);
-        errno = EAGAIN;
-        return -1;
-    }
-
-// Complete buffer with <= threshold available bytes left.
-#define STORE_FREE_THRESHOLD 64
-
-    if (m_store) {
-        bool last_chunk = (m_store->sz_buffer - store_used) <= STORE_FREE_THRESHOLD;
-
-        m_entity_context->add_job(entity_context::job_desc {
-            entity_context::JOB_TYPE_SOCK_TX, !!last_chunk * entity_context::JOB_FLAG_TX_LAST_CHUNK,
-            this, m_store, m_store_offset, store_used - m_store_offset});
-
-        m_store_offset = store_used;
-        if (last_chunk) {
-            m_store = nullptr;
-        }
-    }
-
     errno = errno_tmp;
-    return sent_bytes;
+    return static_cast<ssize_t>(committed);
 }
 
 void sockinfo_tcp::tx_thread_commit(mem_buf_desc_t *buf, uint32_t offset, uint32_t size, int flags)
@@ -1936,6 +2239,18 @@ void sockinfo_tcp::err_lwip_cb(void *pcb_container, err_t err)
 
     ASSERT_LOCKED(conn->m_tcp_con_lock);
 
+    // Worker-mode connect arbitration: a worker socket runs at most one connect
+    // attempt, so a terminal callback needs no attempt identity - the m_conn_state transition
+    // under this lock is the single winner. Publish a connect terminal only while the socket is
+    // still connecting AND still open: once retirement claimed the socket (close/exit), the close
+    // path owns the state and settles the parked caller, so a late terminal must neither mutate
+    // socket state nor raise events on the closed fd.
+    const bool worker_managed = conn->is_worker_posix_managed();
+    if (worker_managed && conn->m_conn_state == TCP_CONN_CONNECTING &&
+        conn->worker_lifecycle() != worker_socket_lifecycle::OPEN) {
+        return;
+    }
+
     /*
      * In case we got RST from the other end we need to marked this socket as ready to read for
      * epoll
@@ -2045,8 +2360,10 @@ err_t sockinfo_tcp::ack_recvd_lwip_cb(void *arg, struct tcp_pcb *tpcb, u32_t ack
     if (conn->sndbuf_available()) {
         // This method can be called for closing socket. In this case there is no epoll context.
         NOTIFY_ON_EVENTS(conn, EPOLLOUT);
-        // Owner-gated: R2C has no sleeper on this pipe.
-        if (conn->get_entity_context()) {
+        // ACK processing is the send-buffer-free producer for a worker-managed blocking send.
+        // Default R2C has no app thread armed on this pipe and must retain its legacy ACK fast
+        // path, so do not pay the wakeup call there.
+        if (conn->is_worker_posix_managed()) {
             conn->m_sock_wakeup_pipe.do_wakeup();
         }
     }
@@ -2270,7 +2587,10 @@ int sockinfo_tcp::handle_rx_error(bool blocking)
     if (g_b_exit) {
         errno = EINTR;
         si_tcp_logdbg("returning with: EINTR");
-    } else if (!is_rtr()) {
+    } else if (is_worker_posix_managed() && worker_lifecycle() != worker_socket_lifecycle::OPEN) {
+        errno = EBADF;
+        si_tcp_logdbg("returning with: EBADF on retiring worker socket");
+    } else if (is_worker_posix_managed() ? !is_rx_open() : !is_rtr()) {
         if (m_conn_state == TCP_CONN_INIT) {
             si_tcp_logdbg("RX on never connected socket");
             errno = ENOTCONN;
@@ -2450,19 +2770,46 @@ ssize_t sockinfo_tcp::rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p
         return 0;
     }
 
-    int errno_tmp = errno;
+    const int errno_tmp = errno;
+    const bool wait_all = (*p_flags & MSG_WAITALL) != 0;
+    const bool peek = (*p_flags & MSG_PEEK) != 0;
     loops_timer rcv_timeout(m_loops_timer.get_timeout_msec());
-    int rx_tot_size = 0;
-    int rc = rx_wait_for_data(*p_flags, __msg, rcv_timeout);
+    size_t requested = 0U;
+
+    for (ssize_t i = 0; i < sz_iov; ++i) {
+        if (SIZE_MAX - requested < p_iov[i].iov_len) {
+            errno = EINVAL;
+            return -1;
+        }
+        requested += p_iov[i].iov_len;
+    }
+    if (requested == 0U) {
+        return 0;
+    }
+
+    std::lock_guard<decltype(m_app_lock)> lock_app(m_app_lock);
+    worker_rx_call_guard rx_call(*this);
+    if (!rx_call.enter()) {
+        errno = g_worker_blocking_exit.load(std::memory_order_acquire) ? EINTR : EBADF;
+        return -1;
+    }
+    // Match the R2C admission threshold exactly. MSG_WAITALL waits for the full request before
+    // consuming anything, so timeout, FIN, or interruption leaves a partial prefix queued.
+    // MSG_PEEK deliberately excludes that full-request threshold and may return the currently
+    // available prefix as soon as one byte exists.
+    const size_t min_ready_bytes = wait_all && !peek ? requested : 1U;
+    const int rc = rx_wait_for_data(*p_flags, __msg, rcv_timeout, min_ready_bytes);
     if (rc < 1) {
         return rc;
     }
 
-    rx_tot_size += rx_fetch_ready_buffers(p_iov, p_iov + sz_iov, __msg);
-
-    // Currently MSG_WAITALL and MSG_PEEK are not supported.
-    // In case of MSG_WAITALL we should loop here until all data is received.
-    // Error queue is not supported.
+    const ssize_t fetched = peek
+        ? static_cast<ssize_t>(rx_peek_ready_buffers(p_iov, p_iov + sz_iov, *p_flags, __msg))
+        : rx_fetch_ready_buffers(p_iov, p_iov + sz_iov, 0U, __msg);
+    if (fetched < 0) {
+        return -1;
+    }
+    const size_t rx_tot_size = static_cast<size_t>(fetched);
 
     if (__from && __fromlen) {
         // For TCP connected 5T fetch from m_connected.
@@ -2474,58 +2821,77 @@ ssize_t sockinfo_tcp::rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p
 
     // Restore errno on function entry in case successs
     errno = errno_tmp;
-    return rx_tot_size;
+    return static_cast<ssize_t>(rx_tot_size);
 }
 
-size_t sockinfo_tcp::rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, struct msghdr *__msg)
+ssize_t sockinfo_tcp::rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, size_t iov_offset,
+                                             struct msghdr *__msg)
 {
-    std::lock_guard<decltype(m_app_lock)> lock_app(m_app_lock);
+    while (p_iov < p_iov_end && iov_offset >= p_iov->iov_len) {
+        iov_offset -= p_iov->iov_len;
+        ++p_iov;
+    }
+    if (p_iov == p_iov_end) {
+        return 0;
+    }
+
+    entity_context::job_reservation rx_job = m_entity_context->reserve_job(this);
+    if (!rx_job) {
+        switch (rx_job.result()) {
+        case entity_context::job_submit_result::NO_MEMORY:
+            errno = ENOMEM;
+            break;
+        case entity_context::job_submit_result::ADMISSION_CLOSED:
+            errno = g_worker_blocking_exit.load(std::memory_order_acquire) ? EINTR : EBADF;
+            break;
+        case entity_context::job_submit_result::SOCKET_RETIRED:
+        default:
+            errno = EBADF;
+            break;
+        }
+        return -1;
+    }
+
     decltype(m_rx_pkt_ready_list) temp_list;
-    size_t temp_ready_byte_count;
-    int temp_rx_ready_list_count;
+    worker_rx_ready_metadata temp_metadata;
 
     {
         // Take all available buffers in a quick shot
         std::lock_guard<decltype(m_tcp_con_lock)> lock(m_tcp_con_lock);
         temp_list.splice_head(m_rx_pkt_ready_list);
-        temp_ready_byte_count = m_rx_ready_byte_count;
-        temp_rx_ready_list_count = m_n_rx_pkt_ready_list_count;
-        m_rx_ready_byte_count = 0U;
-        m_n_rx_pkt_ready_list_count = 0;
+        temp_metadata = worker_rx_ready_metadata::detach_from(
+            m_rx_ready_byte_count, m_rx_pkt_ready_offset, m_n_rx_pkt_ready_list_count);
     }
 
     mem_buf_desc_t *free_buf_last = nullptr;
     mem_buf_desc_t *free_buf_first;
     mem_buf_desc_t *partial_last = free_buf_first = temp_list.front();
-    size_t prev_ready_byte_count = temp_ready_byte_count;
-    int prev_rx_ready_list_count = temp_rx_ready_list_count;
-    size_t curr_iov_left = p_iov->iov_len;
+    size_t prev_ready_byte_count = temp_metadata.byte_count;
+    int prev_rx_ready_list_count = temp_metadata.descriptor_count;
+    size_t curr_iov_left = p_iov->iov_len - iov_offset;
     size_t curr_buf_left;
     uint8_t tls_type = partial_last ? partial_last->rx.tls_type : 0U;
 
     while (partial_last && partial_last->rx.tls_type == tls_type) {
-        // we can work with m_rx_pkt_ready_offset outside the lock because only the
-        // retriever updates the offset.
-        curr_buf_left = partial_last->lwip_pbuf.len - m_rx_pkt_ready_offset;
+        // The detached list owns a local offset until it is published back under the TCP lock.
+        curr_buf_left = partial_last->lwip_pbuf.len - temp_metadata.offset;
         if (curr_buf_left > curr_iov_left) {
-            memcpy(
-                reinterpret_cast<char *>(p_iov->iov_base) + p_iov->iov_len - curr_iov_left,
-                reinterpret_cast<char *>(partial_last->lwip_pbuf.payload) + m_rx_pkt_ready_offset,
-                curr_iov_left);
-            temp_ready_byte_count -= curr_iov_left;
-            m_rx_pkt_ready_offset += curr_iov_left;
+            memcpy(reinterpret_cast<char *>(p_iov->iov_base) + p_iov->iov_len - curr_iov_left,
+                   reinterpret_cast<char *>(partial_last->lwip_pbuf.payload) + temp_metadata.offset,
+                   curr_iov_left);
+            temp_metadata.byte_count -= curr_iov_left;
+            temp_metadata.offset += curr_iov_left;
             curr_iov_left = 0;
         } else {
-            memcpy(
-                reinterpret_cast<char *>(p_iov->iov_base) + p_iov->iov_len - curr_iov_left,
-                reinterpret_cast<char *>(partial_last->lwip_pbuf.payload) + m_rx_pkt_ready_offset,
-                curr_buf_left);
-            temp_ready_byte_count -= curr_buf_left;
+            memcpy(reinterpret_cast<char *>(p_iov->iov_base) + p_iov->iov_len - curr_iov_left,
+                   reinterpret_cast<char *>(partial_last->lwip_pbuf.payload) + temp_metadata.offset,
+                   curr_buf_left);
+            temp_metadata.byte_count -= curr_buf_left;
             curr_iov_left -= curr_buf_left;
             temp_list.pop_front();
             free_buf_last = partial_last;
-            --temp_rx_ready_list_count;
-            m_rx_pkt_ready_offset = 0U;
+            --temp_metadata.descriptor_count;
+            temp_metadata.offset = 0U;
             partial_last->p_next_desc = temp_list.front();
             partial_last = partial_last->p_next_desc;
         }
@@ -2547,7 +2913,7 @@ size_t sockinfo_tcp::rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, stru
         }
     }
 
-    uint32_t tot_read = prev_ready_byte_count - temp_ready_byte_count;
+    uint32_t tot_read = prev_ready_byte_count - temp_metadata.byte_count;
     if (tot_read > 0) {
         mem_buf_desc_t *return_buffer = free_buf_first;
         if (free_buf_last) { // Only if complete buffers were consumed.
@@ -2555,27 +2921,49 @@ size_t sockinfo_tcp::rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, stru
         } else {
             return_buffer = nullptr;
         }
-        m_entity_context->add_job(entity_context::job_desc {
+        const entity_context::job_submit_result result = rx_job.commit(entity_context::job_desc {
             entity_context::JOB_TYPE_SOCK_RX_DATA_RECVD, 0, this, return_buffer, 0U, tot_read});
+        assert(result == entity_context::job_submit_result::ACCEPTED);
+        (void)result;
 
         if (unlikely(m_p_socket_stats)) {
             m_p_socket_stats->n_rx_ready_byte_count -= tot_read;
             m_p_socket_stats->n_rx_ready_pkt_count -=
-                (prev_rx_ready_list_count - temp_rx_ready_list_count);
+                (prev_rx_ready_list_count - temp_metadata.descriptor_count);
         }
     }
 
-    // If all the fetched buffers did not fit into iov return them back
-    if (!temp_list.empty()) {
+    // Publish the detached list's offset and any unconsumed buffers as one TCP-lock transaction.
+    {
         std::lock_guard<decltype(m_tcp_con_lock)> lock(m_tcp_con_lock);
-        m_rx_pkt_ready_list.splice_head(temp_list);
-        m_rx_ready_byte_count += temp_ready_byte_count;
-        m_n_rx_pkt_ready_list_count += temp_rx_ready_list_count;
+        const bool has_detached_descriptors = !temp_list.empty();
+        if (has_detached_descriptors) {
+            m_rx_pkt_ready_list.splice_head(temp_list);
+        }
+        temp_metadata.publish_before_existing(m_rx_ready_byte_count, m_rx_pkt_ready_offset,
+                                              m_n_rx_pkt_ready_list_count,
+                                              has_detached_descriptors);
     }
 
     si_tcp_logfunc("tot_read=%u", tot_read);
 
     return static_cast<ssize_t>(tot_read);
+}
+
+size_t sockinfo_tcp::rx_peek_ready_buffers(iovec *p_iov, iovec *p_iov_end, int flags,
+                                           struct msghdr *__msg)
+{
+    std::lock_guard<decltype(m_tcp_con_lock)> lock(m_tcp_con_lock);
+    int out_flags = 0;
+    const int count = static_cast<int>(p_iov_end - p_iov);
+    const int result = dequeue_packet(p_iov, count, nullptr, nullptr, flags | MSG_PEEK, &out_flags);
+
+    if (__msg && __msg->msg_control && m_rx_pkt_ready_list.front()) {
+        if (!rx_tls_msg(__msg, m_rx_pkt_ready_list.front())) {
+            rx_handle_cmsg(__msg, m_rx_pkt_ready_list.front());
+        }
+    }
+    return result > 0 ? static_cast<size_t>(result) : 0U;
 }
 
 bool sockinfo_tcp::rx_tls_msg(struct msghdr *__msg, mem_buf_desc_t *out_buf)
@@ -2611,12 +2999,13 @@ void sockinfo_tcp::rx_data_recvd(uint32_t tot_size)
     }
 }
 
-int sockinfo_tcp::rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout)
+int sockinfo_tcp::rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout,
+                                   size_t min_ready_bytes)
 {
     // This conditions ensures that m_rx_pkt_ready_list.front() is not null later.
-    if (m_rx_ready_byte_count < 1) {
+    if (m_rx_ready_byte_count < min_ready_bytes) {
         bool blocking = BLOCK_THIS_RUN(m_b_blocking, in_flags);
-        if ((!blocking && (errno = EAGAIN)) || (rx_sleep_wait(rcv_timeout) < 1)) {
+        if ((!blocking && (errno = EAGAIN)) || (rx_sleep_wait(rcv_timeout, min_ready_bytes) < 1)) {
             int ret = handle_rx_error(blocking);
             if (__msg && ret == 0) {
                 /* We don't return a control message in this case. */
@@ -2629,18 +3018,18 @@ int sockinfo_tcp::rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_tim
     return 1;
 }
 
-int sockinfo_tcp::rx_sleep_wait(loops_timer &rcv_timeout)
+int sockinfo_tcp::rx_sleep_wait(loops_timer &rcv_timeout, size_t min_ready_bytes)
 {
     __log_info_func("");
 
     if (safe_mce_sys().is_threads_mode()) {
-        return rx_sleep_wait_threads_mode(rcv_timeout);
+        return rx_sleep_wait_threads_mode(rcv_timeout, min_ready_bytes);
     }
     return rx_sleep_wait_poll(rcv_timeout);
 }
 
 // Entered and returned without the socket lock.
-int sockinfo_tcp::rx_sleep_wait_threads_mode(loops_timer &rcv_timeout)
+int sockinfo_tcp::rx_sleep_wait_threads_mode(loops_timer &rcv_timeout, size_t min_ready_bytes)
 {
     lock_tcp_con();
 
@@ -2649,12 +3038,28 @@ int sockinfo_tcp::rx_sleep_wait_threads_mode(loops_timer &rcv_timeout)
 
     const int timeout_ms = rcv_timeout.time_left_msec();
 
-    // Terminals (exit, !is_rtr) must be in pred: producers wake without RX data.
-    const blocking_wait::result r = blocking_wait::wait_until(
-        lock_adapter, waiter,
-        [this]() { return m_rx_ready_byte_count >= 1 || g_b_exit || !is_rtr(); }, timeout_ms);
+    // Terminals (exit, !is_rx_open, lifecycle != OPEN) must be in pred: producers wake without data.
+    blocking_wait::result r;
+    try {
+        r = blocking_wait::wait_until(
+            lock_adapter, waiter,
+            [this, min_ready_bytes]() {
+                return m_rx_ready_byte_count >= min_ready_bytes ||
+                    g_worker_blocking_exit.load(std::memory_order_acquire) ||
+                    (is_worker_posix_managed() &&
+                     worker_lifecycle() != worker_socket_lifecycle::OPEN) ||
+                    !is_rx_open();
+            },
+            timeout_ms);
+    } catch (...) {
+        // See tx_wait_threads_mode(): this function owns a manual TCP-lock acquisition.
+        unlock_tcp_con();
+        throw;
+    }
 
-    const rx_sleep_wait_outcome outcome = map_rx_sleep_wait_result(r, m_rx_ready_byte_count >= 1);
+    rmb();
+    const rx_sleep_wait_outcome outcome =
+        map_rx_sleep_wait_result(r, m_rx_ready_byte_count >= min_ready_bytes);
     if (outcome.err) {
         errno = outcome.err;
     }
@@ -2663,6 +3068,8 @@ int sockinfo_tcp::rx_sleep_wait_threads_mode(loops_timer &rcv_timeout)
     return outcome.proceed ? 1 : -1;
 }
 
+// R2C / non-worker-threads fallback: the legacy temporary blocking-RX stand-in, preserved so
+// that mode's behavior is unchanged (not reached in practice - see the gate in rx_sleep_wait()).
 int sockinfo_tcp::rx_sleep_wait_poll(loops_timer &rcv_timeout)
 {
     int32_t busy_loop_count = 0;
@@ -2765,6 +3172,8 @@ void sockinfo_tcp::remove_timer()
 bool sockinfo_tcp::rx_input_cb(mem_buf_desc_t *p_rx_pkt_mem_buf_desc_info, void *pv_fd_ready_array)
 {
     struct tcp_pcb *pcb = nullptr;
+    sockinfo_tcp *rss_listener_accept_candidate = nullptr;
+    sockinfo_tcp *parent_listener_to_notify = nullptr;
 
     lock_tcp_con();
 
@@ -2793,6 +3202,20 @@ bool sockinfo_tcp::rx_input_cb(mem_buf_desc_t *p_rx_pkt_mem_buf_desc_info, void 
         pcb = &m_pcb;
     }
 
+    /*
+     * The final ACK of a passive open can reach rx_input_cb() through either the RSS listener
+     * rule or the exact rule installed for the new socket. In both cases the SYN_RCVD pcb still
+     * carries the RSS listener in callback_arg before accept_lwip_cb() replaces that callback
+     * argument. Capture the queue owner now so notification does not depend on which hardware
+     * rule delivered the packet.
+     */
+    if (get_tcp_state(pcb) == SYN_RCVD && p_rx_pkt_mem_buf_desc_info->rx.tcp.p_tcp_h->ack) {
+        sockinfo_tcp *listener = static_cast<sockinfo_tcp *>(pcb->callback_arg);
+        if (listener && listener->is_sockinfo_tcp_listen_rss_child()) {
+            rss_listener_accept_candidate = listener;
+        }
+    }
+
     p_rx_pkt_mem_buf_desc_info->inc_ref_count();
     lwip_pbuf_init_custom(p_rx_pkt_mem_buf_desc_info);
 
@@ -2807,6 +3230,29 @@ bool sockinfo_tcp::rx_input_cb(mem_buf_desc_t *p_rx_pkt_mem_buf_desc_info, void 
 
     m_iomux_ready_fd_array = nullptr;
     unlock_tcp_con();
+
+    /*
+     * accept_lwip_cb() may have enqueued on the captured RSS listener while an outer listener
+     * lock was still held by this receive path. Recheck the queue only after every receive lock is
+     * released, then release the child before taking the parent. The app-facing acceptor takes the
+     * parent before harvesting a child, so this sequential child-then-parent handoff cannot form
+     * the opposite nested edge. Root close waits for every published child before parent
+     * destruction, which keeps the parent alive across this handoff.
+     */
+    if (rss_listener_accept_candidate) {
+        rss_listener_accept_candidate->lock_tcp_con();
+        if (rss_listener_accept_candidate->m_ready_conn_cnt > 0) {
+            parent_listener_to_notify =
+                rss_listener_accept_candidate->m_listen_ctx->get_parent_listen_socket();
+        }
+        rss_listener_accept_candidate->unlock_tcp_con();
+    }
+
+    if (parent_listener_to_notify) {
+        parent_listener_to_notify->lock_tcp_con();
+        parent_listener_to_notify->m_sock_wakeup_pipe.do_wakeup();
+        parent_listener_to_notify->unlock_tcp_con();
+    }
 
     return true;
 }
@@ -3024,6 +3470,24 @@ int sockinfo_tcp::connect_threads_mode()
         return -1;
     }
 
+    entity_context_manager::socket_job_reservation connect_job =
+        entity_context_manager::instance()->reserve_socket_job(this);
+    if (!connect_job) {
+        switch (connect_job.result()) {
+        case entity_context::job_submit_result::NO_MEMORY:
+            errno = ENOMEM;
+            break;
+        case entity_context::job_submit_result::SOCKET_RETIRED:
+            errno = EBADF;
+            break;
+        case entity_context::job_submit_result::ADMISSION_CLOSED:
+        default:
+            errno = EINTR;
+            break;
+        }
+        return -1;
+    }
+
     m_p_connected_dst_entry->prepare_to_send(m_so_ratelimit, false, true);
     if (!connect_bind_any_and_check_rules()) {
         // Non-offloaded / rule mismatch: connect_bind_any_and_check_rules() already set
@@ -3034,8 +3498,15 @@ int sockinfo_tcp::connect_threads_mode()
     fit_rcv_wnd(true);
     report_connected = true;
 
-    entity_context_manager::instance()->distribute_socket(
-        this, entity_context::JOB_TYPE_SOCK_ADD_AND_CONNECT);
+    const entity_context::job_submit_result submit_result =
+        connect_job.commit(this, entity_context::JOB_TYPE_SOCK_ADD_AND_CONNECT);
+    if (submit_result != entity_context::job_submit_result::ACCEPTED) {
+        // No job carries the attempt; land FAILED so a later connect() hits the top
+        // is_errorable() gate (ECONNABORTED), not this EALREADY hole.
+        m_conn_state = TCP_CONN_FAILED;
+        errno = submit_result == entity_context::job_submit_result::NO_MEMORY ? ENOMEM : EINTR;
+        return -1;
+    }
 
     if (!m_b_blocking) {
         connect_async_set_errs();
@@ -3049,25 +3520,123 @@ int sockinfo_tcp::connect_threads_mode()
 // Entered with connect()'s socket lock held. wait_until releases it around block().
 int sockinfo_tcp::connect_wait_threads_mode()
 {
+    // XLIO has no SO connect timeout today, so a blocking connect waits indefinitely for the
+    // handshake to complete or fail - mirroring wait_for_conn_ready_blocking(), which loops on
+    // rx_wait(..., true) with no connect deadline. -1 => infinite, blocking_wait's convention
+    // (documented like the send-path SO_SNDTIMEO note). When a connect-timeout option lands,
+    // only this timeout source changes.
     const int timeout_ms = -1;
 
     tcp_con_lock_adapter lock_adapter(*this);
     blocking_wait_sock_waiter waiter(m_sock_wakeup_pipe, m_rx_epfd);
 
-    // Handshake done, INITED, passthrough, CLOSING, or exit. Passthrough and CLOSING must be in
-    // the pred: worker setPassthrough() leaves CONNECTING; close() may not move conn/sock state.
-    // Without them the sleeper re-arms on that wake and hangs.
-    const blocking_wait::result r = blocking_wait::wait_until(
-        lock_adapter, waiter,
-        [this]() {
-            return m_conn_state != TCP_CONN_CONNECTING || m_sock_state == TCP_SOCK_INITED ||
-                isPassthrough() || m_state >= SOCKINFO_CLOSING || g_b_exit;
-        },
-        timeout_ms);
+    // Predicate, evaluated under the socket lock: stop waiting when the handshake completed
+    // (m_conn_state left TCP_CONN_CONNECTING - connect_lwip_cb set TCP_CONN_CONNECTED, or a
+    // failure callback set a terminal state), when err_lwip_cb reset m_sock_state to
+    // TCP_SOCK_INITED before completion, or when the process is exiting. This is exactly the
+    // negation of wait_for_conn_ready_blocking()'s loop condition
+    // (m_conn_state == TCP_CONN_CONNECTING && m_sock_state != TCP_SOCK_INITED). The terminal
+    // conditions MUST be in the predicate: their producers notify (do_wakeup()) without
+    // establishing the connection, so a connected-only predicate would re-sleep on such a wake.
+    //  isPassthrough() is a terminal predicate leg. When the worker's
+    // connect_entity_context() cannot offload it calls setPassthrough() + do_wakeup() under this
+    // socket lock. Without this leg the predicate would stay false (m_conn_state is left
+    // TCP_CONN_CONNECTING on the passthrough fallback), so the sleeper would re-arm on that wake
+    // and hang while connect_socket_job tore the socket down under it. With it, the sleeper wakes,
+    // sees passthrough, and returns -1 so the connect() redirect performs the OS connect.
+    //  m_state >= SOCKINFO_CLOSING and worker_lifecycle() != OPEN are terminal legs. A
+    // close(fd) racing this parked connect() claims retirement first (visible as lifecycle !=
+    // OPEN, with a wake from submit_worker_tcp_close()) and only later runs prepare_to_close() on
+    // the owner worker, which sets m_state = SOCKINFO_CLOSING. Without these legs the connect
+    // predicate could stay false (a graceful tcp_close() need not move m_conn_state out of
+    // CONNECTING nor set m_sock_state INITED, and a late connect terminal is suppressed on a
+    // retiring socket), so the sleeper would re-arm on that wake and hang / re-lock a socket being
+    // torn down. With them, the sleeper wakes, sees the socket closing, and takes the
+    // owner-cancellation path below so connect() unwinds instead of dereferencing a half-freed
+    // socket. This is the connect analogue of rx/tx's !is_rtr()/!is_rts() terminal legs.
+    blocking_wait::result r;
+    try {
+        r = blocking_wait::wait_until(
+            lock_adapter, waiter,
+            [this]() {
+                return m_conn_state != TCP_CONN_CONNECTING || m_sock_state == TCP_SOCK_INITED ||
+                    isPassthrough() || m_state >= SOCKINFO_CLOSING ||
+                    worker_lifecycle() != worker_socket_lifecycle::OPEN ||
+                    g_worker_blocking_exit.load(std::memory_order_acquire);
+            },
+            timeout_ms);
+    } catch (...) {
+        // pthread cancellation terminates this caller, not the open socket's connect attempt.
+        // blocking_wait restored the socket lock before rethrowing, and the surrounding connect()
+        // frame releases its operation reference while unwinding. Leave the worker-owned attempt
+        // in progress so a later handshake can complete, matching R2C and Linux. A real close or
+        // process-exit wake still takes the explicit owner-cancellation path below.
+        throw;
+    }
 
+    // Owner cancellation: the attempt is still in flight (still CONNECTING and not a
+    // passthrough fallback) but this caller must stop waiting - the wait itself failed
+    // (signal/epoll error), the process is exiting, or the fd is being closed. Ask the owner
+    // worker to cancel through the socket control path and drain until the attempt settles:
+    // cancel_connect_entity_context() moves m_conn_state out of TCP_CONN_CONNECTING under this
+    // lock (a racing genuine terminal callback settles it the same way), and m_state >=
+    // SOCKINFO_CLOSING covers a close control that already tore the socket down (its late connect
+    // terminal is suppressed on a retiring socket, so m_conn_state may legitimately stay
+    // CONNECTING there). The drain deliberately has no exit terminal; see the note below the
+    // loop for why it cannot hang at process exit.
+    const bool exiting_now = g_worker_blocking_exit.load(std::memory_order_acquire);
+    const bool closing_now =
+        m_state >= SOCKINFO_CLOSING || worker_lifecycle() != worker_socket_lifecycle::OPEN;
+    if (m_conn_state == TCP_CONN_CONNECTING && !isPassthrough() &&
+        (r != blocking_wait::result::READY || exiting_now || closing_now)) {
+        int cancel_errno = errno; // INTERRUPTED/ERROR: waiter.block() already set it
+        if (r == blocking_wait::result::READY) {
+            cancel_errno = exiting_now ? EINTR : EBADF;
+        }
+        if (cancel_errno == 0) {
+            cancel_errno = EINTR;
+        }
+
+        assert(worker_state().m_retire_owner);
+        const bool posted = worker_state().m_retire_owner->post_socket_control_locked(
+            this, entity_context::SOCKET_CONTROL_CANCEL_CONNECT);
+        assert(posted);
+        (void)posted;
+
+        // Exit guarantee: the posted control cannot be lost. The worker loop drains every socket
+        // control before it stops, and it cannot finish shutdown while this parked caller still
+        // holds its call reference (the socket stays owned until we return), so the cancel - or
+        // the shutdown force-close that sets SOCKINFO_CLOSING - always terminates this drain.
+        while (m_conn_state == TCP_CONN_CONNECTING && m_state < SOCKINFO_CLOSING) {
+            (void)blocking_wait::wait_until(
+                lock_adapter, waiter,
+                [this]() {
+                    return m_conn_state != TCP_CONN_CONNECTING || m_state >= SOCKINFO_CLOSING;
+                },
+                timeout_ms);
+        }
+
+        if (m_conn_state != TCP_CONN_CONNECTED) {
+            // The cancel won (or the close path owns the socket): report why this caller stopped
+            // waiting, exactly as the pre-slim owner-cancellation acknowledgment did.
+            if (m_conn_state == TCP_CONN_CONNECTING) {
+                // Close-suppressed terminal: force a terminal state for later close()/SO_ERROR.
+                m_conn_state = TCP_CONN_FAILED;
+            }
+            m_error_status = 0;
+            errno = cancel_errno;
+            return -1;
+        }
+        // The handshake completed before the owner processed the cancellation: establishment
+        // wins, exactly as the shared mapping below already prefers connected over exiting.
+    }
+
+    const bool connected = m_conn_state == TCP_CONN_CONNECTED;
+    const bool timed_out = m_conn_state == TCP_CONN_TIMEOUT;
+    const bool exiting = g_worker_blocking_exit.load(std::memory_order_acquire);
+    const bool passthrough = isPassthrough();
     const connect_wait_outcome outcome =
-        map_connect_wait_result(r, m_conn_state == TCP_CONN_CONNECTED,
-                                m_conn_state == TCP_CONN_TIMEOUT, g_b_exit, isPassthrough());
+        map_connect_wait_result(r, connected, timed_out, exiting, passthrough);
 
     if (outcome.ok) {
         // Match R2C success: CONNECTED_RDWR, not passthrough.
@@ -3080,13 +3649,26 @@ int sockinfo_tcp::connect_wait_threads_mode()
     if (outcome.err) {
         errno = outcome.err;
     }
-    m_error_status = errno;
-    // Force a terminal m_conn_state if we were woken by g_b_exit while still connecting, so a
-    // later connect()/close() sees a coherent failed state (mirrors connect()'s EINTR handling).
+    if (m_conn_state != TCP_CONN_TIMEOUT) {
+        m_error_status = 0;
+    }
+    // Force a terminal m_conn_state if we were woken by g_worker_blocking_exit while still
+    // connecting, so a later connect()/close() sees a coherent failed state (mirrors connect()'s
+    // EINTR handling).
     if (m_conn_state == TCP_CONN_CONNECTING) {
         m_conn_state = TCP_CONN_FAILED;
     }
-    // Do not tcp_close() the pcb on the app thread. Worker close job reclaims it.
+    //  unlike R2C connect() - which reclaims the failed offloaded pcb inline
+    // (tcp_close(&m_pcb) + destructor_helper_tcp()) on the same app thread that owns everything -
+    // this failure tail deliberately does NOT tcp_close() the pcb. In worker-threads mode the
+    // pcb/ring are owned by the worker: the app's eventual close() is routed to the worker as a
+    // close control (fd_collection::handle_worker_threads_mode_close), and the worker's
+    // prepare_to_close() does the tcp_close()/abort_connection() + destructor_helper_tcp() there
+    // (prepare_to_close() even special-cases prev_state==CLOSED "This can happen on a failed
+    // connect()"). So the failed pcb IS reclaimed - just on its owner thread at close(), not
+    // leaked. Doing tcp_close(&m_pcb) here on the app thread would race the worker's ring/pcb and
+    // is unsafe; connect-retry-after-failure on the same fd is not supported in worker-threads
+    // mode (close + re-socket, as POSIX portability already requires).
     si_tcp_logdbg("Blocking connect error, m_conn_state=%d m_sock_state=%d errno=%d",
                   static_cast<int>(m_conn_state), static_cast<int>(m_sock_state), errno);
     return -1;
@@ -3096,10 +3678,26 @@ void sockinfo_tcp::connect_entity_context()
 {
     std::lock_guard<decltype(m_tcp_con_lock)> lock(m_tcp_con_lock);
 
+    // Single connect attempt: a cancel control or a close can be processed before
+    // this queued connect job runs. Start the handshake only while the socket is still open and
+    // the attempt is still unsettled (m_conn_state == TCP_CONN_CONNECTING, set when the job was
+    // posted); once settled or retiring, the job is a no-op. Everything below runs under the
+    // socket lock, so the attempt cannot be cancelled mid-body.
+    if (is_worker_posix_managed() &&
+        (worker_lifecycle() != worker_socket_lifecycle::OPEN ||
+         m_conn_state != TCP_CONN_CONNECTING)) {
+        return;
+    }
+
     if (!prepare_dst_to_send(false)) {
         si_tcp_logdbg("non offloaded socket --> connect only via OS (prepare_dst_to_send failed)");
         setPassthrough();
-        // Wake parked blocking connect(); lock already held. Non-blocking: no sleeper.
+        //  a blocking connect() is parked in connect_wait_threads_mode() on this
+        // socket. setPassthrough() flips the awaited predicate (isPassthrough()); post the wake so
+        // the sleeper re-checks and returns -1, letting the connect() redirect run the R2C
+        // handle_close()+OS-connect tail on the app thread. Runs under this method's lock_guard -
+        // the same lock the sleeper arms under - so the wake cannot be lost. No-op for a
+        // non-blocking connect (no sleeper armed); that path is OS-connected by connect_socket_job.
         m_sock_wakeup_pipe.do_wakeup();
         return;
     }
@@ -3131,6 +3729,38 @@ void sockinfo_tcp::connect_entity_context()
     // since wait_for_conn_ready_blocking may block on epoll_wait and the timer sends SYN
     // rexmits.
     register_timer();
+}
+
+void sockinfo_tcp::cancel_connect_entity_context()
+{
+    // Runs on the owner worker under the socket lock (socket control path). The single connect
+    // attempt is still in flight only while m_conn_state == TCP_CONN_CONNECTING: a genuine
+    // terminal callback settles it first and wins, making this a no-op. Once the close path has
+    // begun tearing the socket down (m_state >= SOCKINFO_CLOSING) it owns the pcb - skip; the
+    // parked caller's drain terminates on that state instead.
+    if (m_conn_state != TCP_CONN_CONNECTING || m_state >= SOCKINFO_CLOSING) {
+        return;
+    }
+
+    remove_timer();
+    const enum tcp_state state = get_tcp_state(&m_pcb);
+    if (state == SYN_SENT || state == CLOSED) {
+        tcp_close(&m_pcb);
+    } else {
+        // tcp_abort() re-enters err_lwip_cb(ERR_ABRT) synchronously on this thread (the socket
+        // lock is recursive), so the callback and this function both write the same terminal -
+        // m_conn_state = TCP_CONN_FAILED below - an intentional convergent double-write, kept so
+        // this cancel leg does not depend on the callback's exact error mapping. The re-entry is
+        // benign and NOTIFY-free: tcp_abandon() runs tcp_pcb_remove() before raising the event,
+        // so the pcb is already CLOSED and the callback's PCB_IN_ACTIVE_STATE gate skips the
+        // epoll/iomux event publication on the cancelled fd; only converging state writes and an
+        // idempotent do_wakeup() occur.
+        tcp_abort(&m_pcb);
+    }
+    destructor_helper_tcp();
+    m_conn_state = TCP_CONN_FAILED;
+    m_error_status = 0;
+    m_sock_wakeup_pipe.do_wakeup();
 }
 
 int sockinfo_tcp::bind(const sockaddr *__addr, socklen_t __addrlen)
@@ -3383,14 +4013,16 @@ int sockinfo_tcp::listen(int backlog)
     // Check if XLIO threads are enforced (> 0) for entity context distribution
     if (safe_mce_sys().worker_threads > 0) {
         create_listen_context();
-        start_sockinfo_tcp_listen_objects();
-        success = wait_for_listen_rss_children_ready();
+        success = start_sockinfo_tcp_listen_objects() && wait_for_listen_rss_children_ready();
     } else {
         success = attach_as_uc_receiver(ROLE_TCP_SERVER);
     }
 
     if (!success) {
         /* we will get here if attach_as_uc_receiver failed */
+        if (m_listen_ctx && m_listen_ctx->has_published_listen_rss_children()) {
+            close_started_listen_rss_children();
+        }
         passthrough_unlock("Fallback the connection to os");
         return SYSCALL(listen, m_fd, orig_backlog);
     }
@@ -3447,32 +4079,64 @@ int sockinfo_tcp::rx_verify_available_data()
 }
 
 // Entered with accept_helper's listen lock held.
-int sockinfo_tcp::accept_wait_threads_mode()
+int sockinfo_tcp::accept_wait_threads_mode(loops_timer &accept_timeout)
 {
-    const int timeout_ms = -1;
+    const int timeout_ms = accept_timeout.time_left_msec();
 
     tcp_con_lock_adapter lock_adapter(*this);
-    blocking_wait_sock_waiter waiter(m_sock_wakeup_pipe, m_rx_epfd);
+    blocking_wait_sock_waiter waiter(m_sock_wakeup_pipe, m_rx_epfd, m_fd);
 
-    // Child enqueue is not parent m_ready_conn_cnt until harvest. Save errno (harvest sets EAGAIN).
-    const blocking_wait::result r = blocking_wait::wait_until(
-        lock_adapter, waiter,
-        [this]() {
-            if (g_b_exit || m_sock_state != TCP_SOCK_ACCEPT_READY) {
-                return true;
-            }
-            if (m_ready_conn_cnt > 0) {
-                return true;
-            }
-            const int saved_errno = errno;
-            harvest_sockinfo_tcp_listen_objects();
-            errno = saved_errno;
-            return m_ready_conn_cnt > 0;
-        },
-        timeout_ms);
+    // Predicate, evaluated under the listen socket lock: stop waiting when a connection is ready to
+    // accept OR a terminal condition holds. The terminal conditions MUST be in the predicate: their
+    // producers notify (do_wakeup()) without enqueuing a connection, so a ready-only predicate
+    // would re-sleep on such a wake instead of returning.
+    //   - g_worker_blocking_exit / listen-closed (m_sock_state left TCP_SOCK_ACCEPT_READY via
+    //   close()/shutdown()):
+    //     terminal, checked first so a teardown wake returns even with an empty queue.
+    //   - m_ready_conn_cnt > 0: a connection already sits on this listen socket's accept queue.
+    //   - else harvest: in worker-threads mode incoming connections are enqueued on the listen
+    //     socket's rss CHILDREN (accept_lwip_cb runs on the child). harvest_sockinfo_tcp_listen_
+    //     objects() splices any ready child queue into this parent's m_accepted_conns under the
+    //     child lock; the child producer wakes this parent (see accept_lwip_cb's parent do_wakeup).
+    //     errno is saved/restored because harvest sets EAGAIN when a child yielded nothing, which
+    //     must not leak past a predicate re-check.
+    blocking_wait::result r;
+    try {
+        r = blocking_wait::wait_until(
+            lock_adapter, waiter,
+            [this, &waiter]() {
+                if (g_worker_blocking_exit.load(std::memory_order_acquire) ||
+                    m_sock_state != TCP_SOCK_ACCEPT_READY) {
+                    return true;
+                }
+                if (m_ready_conn_cnt > 0) {
+                    return true;
+                }
+                // The shadow kernel listener shares this epoll set with the worker wake pipe and
+                // possibly ring CQ fds. Only readiness for that exact listener returns control to
+                // accept_helper(), whose outer loop performs the existing nonblocking OS poll and
+                // accept. Treating every non-wakeup event as shadow readiness would turn unrelated
+                // CQ traffic into an accept spin.
+                if (waiter.was_woken_by_watched_fd()) {
+                    return true;
+                }
+                const int saved_errno = errno;
+                harvest_sockinfo_tcp_listen_objects();
+                errno = saved_errno;
+                return m_ready_conn_cnt > 0;
+            },
+            timeout_ms);
+    } catch (...) {
+        // accept_helper() entered with a manual TCP-lock acquisition and has no outer RAII guard.
+        unlock_tcp_con();
+        throw;
+    }
 
-    const accept_wait_outcome outcome = map_accept_wait_result(
-        r, m_ready_conn_cnt > 0, g_b_exit, m_sock_state != TCP_SOCK_ACCEPT_READY);
+    /* coverity[check_return][unchecked_value] */
+    const bool exiting = g_worker_blocking_exit.load(std::memory_order_acquire);
+    const bool listener_closed = m_sock_state != TCP_SOCK_ACCEPT_READY;
+    const accept_wait_outcome outcome =
+        map_accept_wait_result(r, m_ready_conn_cnt > 0, exiting, listener_closed);
     if (outcome.err) {
         errno = outcome.err;
     }
@@ -3509,6 +4173,7 @@ int sockinfo_tcp::accept_helper(struct sockaddr *__addr, socklen_t *__addrlen,
         return -1;
     }
 
+    loops_timer accept_timeout(m_loops_timer.get_timeout_msec());
     lock_tcp_con();
 
     si_tcp_logdbg("sock state = %d", get_tcp_state(&m_pcb));
@@ -3545,13 +4210,22 @@ int sockinfo_tcp::accept_helper(struct sockaddr *__addr, socklen_t *__addrlen,
             }
         }
 
-        // Worker-threads: do not ring-poll. Non-blocking: harvest once (EAGAIN if empty).
-        // Blocking: park; harvest lives in accept_wait_threads_mode()'s pred.
+        // Worker-threads: harvest once. Non-blocking: EAGAIN if empty. Blocking: park.
         // R2C keeps rx_wait().
         int tmp_ret;
         if (safe_mce_sys().is_threads_mode()) {
-            tmp_ret = m_b_blocking ? accept_wait_threads_mode()
-                                   : harvest_sockinfo_tcp_listen_objects();
+            const int saved_errno = errno;
+            harvest_sockinfo_tcp_listen_objects();
+            errno = saved_errno;
+            if (m_ready_conn_cnt > 0) {
+                continue;
+            }
+            if (!m_b_blocking) {
+                unlock_tcp_con();
+                errno = EAGAIN;
+                return -1;
+            }
+            tmp_ret = accept_wait_threads_mode(accept_timeout);
         } else {
             tmp_ret = rx_wait(poll_count, m_b_blocking);
         }
@@ -3723,13 +4397,19 @@ bool sockinfo_tcp::create_listen_rss_children()
 
     for (size_t i = 0; i < num_threads; ++i) {
         // Create sockinfo_tcp object with fake fd (RSS child doesn't need shadow socket)
-        sockinfo_tcp *rss_child = new sockinfo_tcp(SOCKET_FAKE_FD, m_family);
+        std::unique_ptr<sockinfo_tcp> rss_child;
+        try {
+            rss_child.reset(new sockinfo_tcp(SOCKET_FAKE_FD, m_family));
+        } catch (...) {
+            si_tcp_logwarn("Cannot create listen rss_child sockinfo %zu", i);
+            return false;
+        }
         if (!rss_child) {
             si_tcp_logwarn("Cannot create listen rss_child sockinfo %zu", i);
             return false;
         }
 
-        rss_child->lock_tcp_con();
+        std::lock_guard<decltype(rss_child->m_tcp_con_lock)> child_lock(rss_child->m_tcp_con_lock);
 
         // Create listen context for rss_child if it doesn't exist
         rss_child->create_listen_context();
@@ -3750,13 +4430,17 @@ bool sockinfo_tcp::create_listen_rss_children()
         rss_child->m_sock_offload = m_sock_offload; // From prepareListen/setPassthrough
         rss_child->m_b_blocking = m_b_blocking; // Blocking mode for accept() calls
 
+        // Accepted sockets inherit options from the RSS child. Seed the child with the root
+        // listener's saved options so worker-mode accept preserves the same contract as the
+        // ordinary single-listener path.
+        set_sock_options(rss_child.get());
+
         // Bind to same address as parent using already-copied m_bound - do tcp_bind
         const ip_address &ip = m_bound.get_ip_addr();
         if (ERR_OK !=
             tcp_bind(&rss_child->m_pcb, reinterpret_cast<const ip_addr_t *>(&ip),
                      ntohs(m_bound.get_in_port()), rss_child->m_pcb.is_ipv6)) {
             si_tcp_logwarn("tcp_bind failed for listen rss_child %zu", i);
-            rss_child->unlock_tcp_con();
             return false;
         }
         if (rss_child->m_p_socket_stats) {
@@ -3780,24 +4464,66 @@ bool sockinfo_tcp::create_listen_rss_children()
         tcp_clone_conn(&rss_child->m_pcb, sockinfo_tcp::clone_conn_cb);
         tcp_accepted_pcb(&rss_child->m_pcb, sockinfo_tcp::accepted_pcb_cb);
 
-        rss_child->unlock_tcp_con();
-
-        m_listen_ctx->add_listen_rss_child(rss_child);
-        si_tcp_logdbg("Created listen rss_child %zu (p: %p)", i, rss_child);
+        sockinfo_tcp *const child = rss_child.get();
+        if (!m_listen_ctx->add_listen_rss_child(std::move(rss_child))) {
+            si_tcp_logwarn("Cannot retain listen rss_child sockinfo %zu", i);
+            return false;
+        }
+        si_tcp_logdbg("Created listen rss_child %zu (p: %p)", i, child);
     }
     return true;
 }
 
-void sockinfo_tcp::start_sockinfo_tcp_listen_objects()
+bool sockinfo_tcp::start_sockinfo_tcp_listen_objects()
 {
     si_tcp_logfunc("");
 
     if (!create_listen_rss_children()) {
         si_tcp_logerr(
             "Failed to create listen socket rss_children for entity context distribution");
+        close_unstarted_listen_rss_children();
+        return false;
+    }
+    if (!entity_context_manager::instance()->distribute_listen_socket(this)) {
+        si_tcp_logerr("Failed to reserve worker jobs for listen rss_children");
+        close_unstarted_listen_rss_children();
+        return false;
+    }
+    m_listen_ctx->publish_listen_rss_children();
+    return true;
+}
+
+void sockinfo_tcp::close_unstarted_listen_rss_children()
+{
+    if (!m_listen_ctx) {
         return;
     }
-    entity_context_manager::instance()->distribute_listen_socket(this);
+    m_listen_ctx->destroy_unstarted_listen_rss_children();
+    destroy_listen_context();
+}
+
+void sockinfo_tcp::close_started_listen_rss_children()
+{
+    assert(m_listen_ctx);
+    assert(m_listen_ctx->has_published_listen_rss_children());
+    assert(g_p_fd_collection);
+
+    /*
+     * Child attachment and close run on the worker owners. Do not wait for them while holding the
+     * root listener lock because accept callbacks take the root lock from a child worker context.
+     */
+    unlock_tcp_con();
+    g_p_fd_collection->handle_listen_socket_close_worker_threads_mode(this, true);
+    lock_tcp_con();
+
+    /*
+     * Keep the now-empty context until root-socket destruction. A concurrent close() can be
+     * waiting in the same child-close transaction while this failure rollback returns. The
+     * wrapper and close-owner references keep the root socket alive, so retaining the context
+     * gives every waiter a stable mutex and condition variable. Keeping the retirement owner also
+     * ensures a close control already queued on that owner cannot later be bypassed by an
+     * application-thread final-reference release.
+     */
 }
 
 bool sockinfo_tcp::wait_for_listen_rss_children_ready()
@@ -3927,7 +4653,11 @@ err_t sockinfo_tcp::accept_lwip_cb(void *arg, struct tcp_pcb *child_pcb, err_t e
         conn->m_ready_conn_cnt++;
         if (conn->is_sockinfo_tcp_listen_rss_child()) {
             conn->remove_received_syn_socket(new_sock);
-            NOTIFY_ON_EVENTS(conn->m_listen_ctx->get_parent_listen_socket(), EPOLLIN);
+            sockinfo_tcp *parent = conn->m_listen_ctx->get_parent_listen_socket();
+            assert(parent);
+            assert(parent->m_listen_ctx);
+            parent->m_listen_ctx->increment_ready_connection_count();
+            NOTIFY_ON_EVENTS(parent, EPOLLIN);
         } else {
             NOTIFY_ON_EVENTS(conn, EPOLLIN);
         }
@@ -3944,16 +4674,9 @@ err_t sockinfo_tcp::accept_lwip_cb(void *arg, struct tcp_pcb *child_pcb, err_t e
 
     conn->unlock_tcp_con();
 
-    // RSS child enqueue: child's do_wakeup does not reach the parent acceptor. Lock parent.
-    // Order: child then parent (sequential). Harvest is parent then child. No inversion.
-    if (conn->is_sockinfo_tcp_listen_rss_child()) {
-        sockinfo_tcp *parent = conn->m_listen_ctx->get_parent_listen_socket();
-        if (parent) {
-            parent->lock_tcp_con();
-            parent->m_sock_wakeup_pipe.do_wakeup();
-            parent->unlock_tcp_con();
-        }
-    }
+    // rx_input_cb() wakes an RSS child's parent only after releasing its outer child lock. The
+    // app-facing acceptor harvests parent-to-child, so notifying here would create the opposite
+    // child-to-parent edge even though the recursive lock level acquired above has been released.
 
     new_sock->lock_tcp_con();
 
@@ -4026,6 +4749,13 @@ err_t sockinfo_tcp::clone_conn_cb(void *arg, struct tcp_pcb **newpcb)
     }
 
     ASSERT_LOCKED(conn->m_tcp_con_lock);
+    bool listener_ref = false;
+    if (conn->is_worker_posix_managed()) {
+        listener_ref = conn->try_acquire_worker_call_ref();
+        if (!listener_ref) {
+            return ERR_ABRT;
+        }
+    }
     conn->m_tcp_con_lock.unlock();
 
     new_sock = conn->accept_clone();
@@ -4036,11 +4766,18 @@ err_t sockinfo_tcp::clone_conn_cb(void *arg, struct tcp_pcb **newpcb)
         /* XXX We have to search for correct listen socket every time,
          * because the listen socket may be closed and reopened. */
         new_sock->m_pcb.listen_sock = (void *)conn;
+        if (listener_ref) {
+            new_sock->worker_state().m_timewait_listener = conn;
+            listener_ref = false;
+        }
     } else {
         ret_val = ERR_MEM;
     }
 
     conn->m_tcp_con_lock.lock();
+    if (listener_ref) {
+        conn->release_worker_ref();
+    }
 
     return ret_val;
 }
@@ -4054,19 +4791,79 @@ void sockinfo_tcp::accepted_pcb_cb(struct tcp_pcb *accepted_pcb)
     accepted_sock->unlock_tcp_con();
 }
 
-err_t sockinfo_tcp::syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb)
+err_t sockinfo_tcp::syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb,
+                                             enum tcp_timewait_reuse_phase phase)
 {
     sockinfo_tcp *listen_sock = (sockinfo_tcp *)((arg));
 
-    if (unlikely(!listen_sock || !newpcb)) {
+    if (unlikely(!newpcb)) {
         return ERR_VAL;
     }
 
     sockinfo_tcp *new_sock = (sockinfo_tcp *)((newpcb->my_container));
-
-    ASSERT_LOCKED(new_sock->m_tcp_con_lock);
-    if (unlikely(!new_sock->is_incoming())) {
+    if (unlikely(!new_sock)) {
         return ERR_VAL;
+    }
+
+    if (phase == TCP_TIMEWAIT_REUSE_CLAIM) {
+        if (!new_sock->is_worker_posix_managed()) {
+            return ERR_OK;
+        }
+
+        /*
+         * Read-only admission predicate. CLAIM and COMMIT run inside one continuous
+         * m_tcp_con_lock hold on the receive path, and (RETIRING, 0) is stable under that lock:
+         * an unlocked reference bump requires an already-held reference (impossible at zero
+         * references), and every competing lifecycle transition takes this lock. So admitting
+         * the reuse writes nothing; the word stays (RETIRING, 0) until COMMIT reopens it, and
+         * the normal retirement recheck still covers a reuse that never commits.
+         *
+         * The listener lifecycle test below is best-effort admission filtering on a lock-free
+         * word owned by another socket. It can go stale immediately and must not be re-checked
+         * at COMMIT.
+         */
+        ASSERT_LOCKED(new_sock->m_tcp_con_lock);
+        if (!new_sock->worker_state().m_close_processed || !new_sock->is_incoming() ||
+            get_tcp_state(newpcb) != TIME_WAIT || !new_sock->worker_state().m_timewait_listener ||
+            new_sock->worker_state().m_timewait_listener != arg ||
+            new_sock->worker_state().m_timewait_listener->worker_lifecycle() !=
+                worker_socket_lifecycle::OPEN) {
+            return ERR_VAL;
+        }
+
+        const worker_socket_lifetime::snapshot lifetime =
+            new_sock->worker_state().m_lifetime.load_snapshot();
+        if (lifetime.state != worker_socket_lifecycle::RETIRING || lifetime.refs != 0U) {
+            return ERR_VAL;
+        }
+        return ERR_OK;
+    }
+
+    assert(phase == TCP_TIMEWAIT_REUSE_COMMIT);
+    ASSERT_LOCKED(new_sock->m_tcp_con_lock);
+
+    const bool worker_managed = new_sock->is_worker_posix_managed();
+    if (worker_managed) {
+        /*
+         * The m_tcp_con_lock hold is continuous from CLAIM, so every CLAIM-stable condition
+         * still holds here; re-check them as asserts only. The worker COMMIT leg must not fail:
+         * the PCB is already recycled and there is no rollback path (none is needed - the
+         * lifetime word never left (RETIRING, 0), so an uncommitted reuse is still covered by
+         * the normal retirement recheck).
+         */
+        assert(new_sock->worker_lifecycle() == worker_socket_lifecycle::RETIRING);
+        assert(new_sock->worker_ref_count() == 0U);
+        assert(new_sock->worker_state().m_timewait_listener &&
+               new_sock->worker_state().m_timewait_listener == arg);
+        assert(new_sock->is_incoming());
+        listen_sock = new_sock->worker_state().m_timewait_listener;
+    } else {
+        if (unlikely(!listen_sock)) {
+            return ERR_VAL;
+        }
+        if (unlikely(!new_sock->is_incoming())) {
+            return ERR_VAL;
+        }
     }
 
     /*
@@ -4110,11 +4907,32 @@ err_t sockinfo_tcp::syn_received_timewait_cb(void *arg, struct tcp_pcb *newpcb)
 
     IF_STATS_O(listen_sock, listen_sock->m_p_socket_stats->listen_counters.n_rx_syn_tw++);
     listen_sock->m_tcp_con_lock.unlock();
-    if (new_sock->m_p_group) {
+    if (worker_managed) {
+        new_sock->m_pcb.flags |= TF_WORKER_PARTIAL_WND_SPLIT;
+        new_sock->worker_state().m_close_processed = false;
+        new_sock->worker_state().m_force_close = false;
+        const bool reopened = new_sock->worker_state().m_lifetime.reopen_from_retirement();
+        assert(reopened);
+        (void)reopened;
+
+        // Worker publication takes the fd-collection lock. Never acquire that lock while holding
+        // m_tcp_con_lock because fd-based admission takes them in the opposite order. The socket
+        // is not discoverable until reuse_sockfd() publishes it, and owner-side close is deferred
+        // back to this worker, so temporarily dropping and restoring the callback lock is safe.
+        new_sock->unlock_tcp_con();
+    }
+
+    if (worker_managed) {
+        assert(new_sock->m_entity_context);
+        new_sock->m_entity_context->reuse_worker_sockfd(new_sock->m_fd, new_sock);
+    } else if (new_sock->m_p_group) {
         new_sock->m_p_group->reuse_sockfd(new_sock->m_fd, new_sock);
     } else {
         assert(g_p_fd_collection);
         g_p_fd_collection->reuse_sockfd(new_sock->m_fd, new_sock);
+    }
+    if (worker_managed) {
+        new_sock->lock_tcp_con();
     }
     return ERR_OK;
 }
@@ -4249,6 +5067,17 @@ err_t sockinfo_tcp::connect_lwip_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
 
     conn->lock_tcp_con();
 
+    // Worker-mode connect arbitration: publish only while the single connect attempt
+    // is still in flight (m_conn_state == TCP_CONN_CONNECTING under this lock) and the socket is
+    // still open. A cancelled attempt or a retiring socket suppresses the late callback - the
+    // owner cancel / close path settles the state for the parked caller instead.
+    if (conn->is_worker_posix_managed() &&
+        (conn->m_conn_state != TCP_CONN_CONNECTING ||
+         conn->worker_lifecycle() != worker_socket_lifecycle::OPEN)) {
+        conn->unlock_tcp_con();
+        return ERR_OK;
+    }
+
     if (conn->m_conn_state == TCP_CONN_TIMEOUT) {
         // tcp_si_logdbg("conn timeout");
         conn->m_error_status = ETIMEDOUT;
@@ -4382,18 +5211,8 @@ int sockinfo_tcp::os_epoll_wait_with_tcp_timers(epoll_event *ep_events, int maxe
 bool sockinfo_tcp::is_readable(bool do_poll, fd_array_t *p_fd_array)
 {
     if (is_server()) {
-        bool state = false;
-        // m_conn_cond.lock();
-        if (m_listen_ctx) {
-            for (size_t i = 0; i < m_listen_ctx->get_listen_rss_children_size(); i++) {
-                if (m_listen_ctx->get_listen_rss_child(i)->m_ready_conn_cnt > 0) {
-                    state = true;
-                    break;
-                }
-            }
-        }
-
-        state |= m_ready_conn_cnt == 0 ? false : true;
+        bool state = m_listen_ctx && m_listen_ctx->has_ready_connections();
+        state |= m_ready_conn_cnt != 0;
         if (state) {
             si_tcp_logdbg("accept ready");
             return true;
@@ -4520,6 +5339,52 @@ bool sockinfo_tcp::is_errorable(int *errors)
  * FIXME: need to split sock connected state in two: TCP_SOCK_CON_TX/RX
  */
 int sockinfo_tcp::shutdown(int __how)
+{
+    if (safe_mce_sys().is_threads_mode() && m_entity_context) {
+        worker_shutdown_result result;
+        // The queued worker job carries a pointer to result. pthread cancellation at the
+        // condition-variable wait would unwind this stack while the worker can still complete the
+        // job. Keep cancellation disabled until the mandatory acknowledgement makes that pointer
+        // dead. Restoring an enabled state may immediately deliver a pending cancellation, but by
+        // then the worker has completed and no longer accesses result.
+        pthread_cancellation_disable_guard cancellation_guard;
+        const int cancel_rc = cancellation_guard.disable();
+        if (cancel_rc != 0) {
+            errno = cancel_rc;
+            return -1;
+        }
+
+        entity_context::job_desc job {
+            entity_context::JOB_TYPE_SOCK_SHUTDOWN, 0, this, nullptr, 0U, 0U};
+        job.shutdown_how = __how;
+        job.shutdown_result = &result;
+
+        std::lock_guard<decltype(m_lock_snd)> send_lock(m_lock_snd);
+        const entity_context::job_submit_result submit_result = m_entity_context->add_job(job);
+        if (submit_result != entity_context::job_submit_result::ACCEPTED) {
+            if (submit_result == entity_context::job_submit_result::NO_MEMORY) {
+                errno = ENOMEM;
+            } else if (submit_result == entity_context::job_submit_result::ADMISSION_CLOSED) {
+                errno = g_worker_blocking_exit.load(std::memory_order_acquire) ? EINTR : EBADF;
+            } else if (submit_result == entity_context::job_submit_result::SOCKET_RETIRED) {
+                errno = EBADF;
+            } else {
+                errno = EIO;
+            }
+            return -1;
+        }
+        int error = 0;
+        const int rc = result.wait(error);
+        if (rc < 0) {
+            errno = error;
+        }
+        return rc;
+    }
+
+    return shutdown_entity_context(__how);
+}
+
+int sockinfo_tcp::shutdown_entity_context(int __how)
 {
     err_t err = ERR_OK;
 
@@ -5293,7 +6158,11 @@ int sockinfo_tcp::getsockopt_offload(int __level, int __optname, void *__optval,
         break;
     case SOL_SOCKET:
         switch (__optname) {
-        case SO_ERROR:
+        case SO_ERROR: {
+            const bool worker_managed = is_worker_posix_managed();
+            if (worker_managed) {
+                lock_tcp_con();
+            }
             if (*__optlen >= sizeof(int)) {
                 *(int *)__optval = m_error_status;
                 si_tcp_logdbg("(SO_ERROR) status: %d", m_error_status);
@@ -5302,7 +6171,11 @@ int sockinfo_tcp::getsockopt_offload(int __level, int __optname, void *__optval,
             } else {
                 errno = EINVAL;
             }
+            if (worker_managed) {
+                unlock_tcp_con();
+            }
             break;
+        }
         case SO_REUSEADDR:
             if (*__optlen >= sizeof(int)) {
                 *(int *)__optval = m_pcb.so_options & SOF_REUSEADDR;
@@ -6123,12 +6996,41 @@ void tcp_timers_collection::handle_timer_expired(void *user_data)
         // TODO Trylock can miss a timer tick and we don't trigger it in unlock() anymore.
         if (!p_sock->trylock_tcp_con()) {
             bool destroyable = false;
+            bool worker_destroy = false;
             if (!p_sock->is_cleaned()) {
                 p_sock->handle_timer_expired();
-                destroyable = p_sock->is_destroyable_no_lock();
+                if (p_sock->is_worker_posix_managed()) {
+                    /*
+                     * Structural exclusion: complete_worker_socket_destroy() is the only
+                     * destruction doorway for a worker-managed socket, so the legacy destroyable
+                     * branch below must never run for one - destroy_sockfd() would also decrement
+                     * n_pending_sockets, which worker sockets never incremented. DESTROY_CLAIMED
+                     * can be observed here transiently: the claim winner drops m_tcp_con_lock
+                     * before completing the destruction, so this tick must do nothing and let the
+                     * winner proceed.
+                     */
+                    if (p_sock->worker_lifecycle() == worker_socket_lifecycle::RETIRING &&
+                        p_sock->worker_state().m_close_processed && p_sock->is_closable()) {
+                        entity_context *owner = p_sock->get_worker_retire_owner();
+                        if (owner) {
+                            const bool posted = owner->post_socket_control_locked(
+                                p_sock, entity_context::SOCKET_CONTROL_RETIRE_RECHECK);
+                            assert(posted);
+                            (void)posted;
+                        } else if (p_sock->worker_ref_count() == 0U) {
+                            worker_destroy = p_sock->worker_state()
+                                                 .m_lifetime.try_claim_destruction_without_ref();
+                        }
+                    }
+                } else {
+                    destroyable = p_sock->is_destroyable_no_lock();
+                }
             }
             p_sock->unlock_tcp_con();
-            if (destroyable) {
+            if (worker_destroy) {
+                // The destruction claim was taken on the no-retire-owner branch above.
+                entity_context::complete_worker_socket_destroy(nullptr, p_sock);
+            } else if (destroyable) {
                 if (p_sock->get_poll_group()) {
                     p_sock->get_poll_group()->mark_socket_to_destroy(p_sock);
                 } else {

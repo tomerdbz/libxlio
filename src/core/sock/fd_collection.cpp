@@ -14,6 +14,7 @@
 #include "sockinfo_udp.h"
 #include "sockinfo_tcp.h"
 #include "event/entity_context.h"
+#include "event/event_handler_manager.h"
 #include "iomux/epfd_info.h"
 
 #undef MODULE_NAME
@@ -30,6 +31,216 @@
 #define fdcoll_logfunc    __log_func
 
 fd_collection *g_p_fd_collection = nullptr;
+
+fd_collection::socket_call_ref::socket_call_ref(socket_call_ref &&other) noexcept
+    : m_sock(other.m_sock)
+    , m_owns_worker_ref(other.m_owns_worker_ref)
+    , m_status(other.m_status)
+{
+    other.m_sock = nullptr;
+    other.m_owns_worker_ref = false;
+    other.m_status = socket_call_status::NOT_XLIO;
+}
+
+fd_collection::socket_call_ref &fd_collection::socket_call_ref::operator=(
+    socket_call_ref &&other) noexcept
+{
+    if (this != &other) {
+        reset();
+        m_sock = other.m_sock;
+        m_owns_worker_ref = other.m_owns_worker_ref;
+        m_status = other.m_status;
+        other.m_sock = nullptr;
+        other.m_owns_worker_ref = false;
+        other.m_status = socket_call_status::NOT_XLIO;
+    }
+    return *this;
+}
+
+void fd_collection::socket_call_ref::release_worker_socket_ref(sockinfo *sock)
+{
+    static_cast<sockinfo_tcp *>(sock)->release_worker_ref();
+}
+
+void fd_collection::set_socket(int fd, sockinfo *si)
+{
+    const bool needs_worker_ref = safe_mce_sys().worker_threads > 0 && si &&
+        si->get_protocol() == PROTO_TCP && !si->is_xlio_socket();
+    assert(!needs_worker_ref || static_cast<sockinfo_tcp *>(si)->is_worker_posix_managed());
+    m_p_sockfd_map[fd].publish(si, needs_worker_ref);
+}
+
+fd_collection::socket_call_ref fd_collection::acquire_socket_call(int fd)
+{
+    // Preserve the legacy R2C lookup exactly. Only worker-mode TCP needs a synchronized fd-map
+    // lookup paired with a strong object reference.
+    if (safe_mce_sys().worker_threads == 0) {
+        return socket_call_ref(get_sockfd(fd), false);
+    }
+
+    if (!is_valid_fd(fd)) {
+        return {};
+    }
+
+    // Pointer and admission kind are one atomic snapshot. Do not dereference a worker TCP pointer
+    // until the fd lock has revalidated the slot and the lifetime reference has been acquired.
+    fd_socket_slot::snapshot current = m_p_sockfd_map[fd].load();
+    if (!current.needs_worker_ref) {
+        return socket_call_ref(current.socket, false);
+    }
+
+    lock();
+    current = m_p_sockfd_map[fd].load();
+    sockinfo *sock = current.socket;
+    bool owns_worker_ref = false;
+    socket_call_status status = sock ? socket_call_status::ACQUIRED : socket_call_status::NOT_XLIO;
+
+    if (sock && current.needs_worker_ref) {
+        sockinfo_tcp *tcp_sock = static_cast<sockinfo_tcp *>(sock);
+        assert(tcp_sock->get_protocol() == PROTO_TCP);
+        assert(!tcp_sock->is_xlio_socket());
+        assert(tcp_sock->is_worker_posix_managed());
+        owns_worker_ref = tcp_sock->try_acquire_worker_call_ref();
+        if (!owns_worker_ref) {
+            sock = nullptr;
+            status = socket_call_status::RETIRING;
+        }
+    }
+
+    unlock();
+    return socket_call_ref(sock, owns_worker_ref, status);
+}
+
+bool fd_collection::publish_worker_socket_if_open(int fd, sockinfo_tcp *si)
+{
+    lock();
+    const bool publish = is_valid_fd(fd) && si->worker_lifecycle() == worker_socket_lifecycle::OPEN;
+    if (publish) {
+        m_p_sockfd_map[fd].publish(si, true);
+    }
+    unlock();
+    return publish;
+}
+
+bool fd_collection::clear_socket_if(int fd, const sockinfo *expected)
+{
+    lock();
+    bool cleared = false;
+    if (is_valid_fd(fd)) {
+        if (m_p_sockfd_map[fd].load().socket == expected) {
+            m_p_sockfd_map[fd].clear();
+            cleared = true;
+        }
+    }
+    unlock();
+    return cleared;
+}
+
+fd_collection::worker_close_claim fd_collection::claim_worker_tcp_close(int fd)
+{
+    worker_close_claim claim;
+
+    if (!is_valid_fd(fd) || !m_p_sockfd_map[fd].load().needs_worker_ref) {
+        return claim;
+    }
+
+    lock();
+    if (!is_valid_fd(fd)) {
+        unlock();
+        return claim;
+    }
+
+    fd_socket_slot::snapshot current = m_p_sockfd_map[fd].load();
+    if (!current.socket || !current.needs_worker_ref) {
+        unlock();
+        return claim;
+    }
+
+    sockinfo_tcp *tcp_sock = static_cast<sockinfo_tcp *>(current.socket);
+    assert(tcp_sock->get_protocol() == PROTO_TCP);
+    assert(!tcp_sock->is_xlio_socket());
+    assert(tcp_sock->is_worker_posix_managed());
+    claim.sock = tcp_sock;
+    if (tcp_sock->begin_worker_retirement()) {
+        m_p_sockfd_map[fd].clear();
+        claim.result = worker_close_result::CLAIMED;
+    }
+
+    unlock();
+    return claim;
+}
+
+void fd_collection::submit_worker_tcp_close(sockinfo_tcp *sock, bool force)
+{
+    // Retirement is already visible to the wait predicate.
+    // Wake before close control can park behind an admitted receive call.
+    sock->wakeup_worker_blocking_waiters();
+
+    sock->lock_tcp_con();
+    sock->worker_state().m_force_close = sock->worker_state().m_force_close || force;
+    const bool root_listener = sock->get_listen_context() &&
+        !sock->is_sockinfo_tcp_listen_rss_child() &&
+        sock->get_listen_context()->has_published_listen_rss_children();
+    const bool force_close = sock->worker_state().m_force_close;
+    sock->unlock_tcp_con();
+
+    if (root_listener) {
+        // accept_lwip_cb() reaches the root listener while the worker owns an RSS-child lock.
+        // Never wait for or lock an RSS child while holding the root lock, or close can deadlock
+        // against that child-to-root callback path.
+        handle_listen_socket_close_worker_threads_mode(sock, force_close);
+    }
+
+    sock->lock_tcp_con();
+
+    bool destroy = false;
+    entity_context *owner = sock->get_worker_retire_owner();
+    if (owner) {
+        uint32_t controls = entity_context::SOCKET_CONTROL_CLOSE;
+        if (sock->worker_state().m_force_close) {
+            controls |= entity_context::SOCKET_CONTROL_FORCE_CLOSE;
+        }
+        // An in-flight blocking connect needs no cancel request here: retirement is already
+        // visible and woken above, so the parked caller posts SOCKET_CONTROL_CANCEL_CONNECT
+        // itself, and the close control's prepare_to_close() tears down an unattended attempt.
+        const bool posted = owner->post_socket_control_locked(sock, controls, true);
+        assert(posted);
+        (void)posted;
+        sock->unlock_tcp_con();
+        return;
+    }
+
+    sock->prepare_to_close(sock->worker_state().m_force_close);
+    sock->worker_state().m_close_processed = true;
+    if (sock->is_closable() && sock->worker_ref_count() == 1U) {
+        destroy = sock->worker_state().m_lifetime.consume_owner_ref_and_claim_destruction();
+    }
+    if (!destroy) {
+        const worker_lifetime_release action = sock->worker_state().m_lifetime.release();
+        if (action == worker_lifetime_release::RECHECK_RETIREMENT && sock->is_closable()) {
+            destroy = sock->worker_state().m_lifetime.try_claim_destruction_without_ref();
+        }
+    }
+    sock->unlock_tcp_con();
+
+    if (destroy) {
+        // The destruction claim was taken on the no-retire-owner branch above.
+        entity_context::complete_worker_socket_destroy(nullptr, sock);
+    }
+}
+
+void fd_collection::retire_worker_sockets_for_shutdown()
+{
+    for (int fd = 0; fd < m_n_fd_map_size; ++fd) {
+        worker_close_claim claim = claim_worker_tcp_close(fd);
+        if (claim.result != worker_close_result::CLAIMED) {
+            continue;
+        }
+
+        remove_from_all_epfds(fd, false, claim.sock);
+        submit_worker_tcp_close(claim.sock, true);
+    }
+}
 
 fd_collection::fd_collection()
     : lock_mutex_recursive("fd_collection")
@@ -50,8 +261,7 @@ fd_collection::fd_collection()
     }
     fdcoll_logdbg("using open files max limit of %d file descriptors", m_n_fd_map_size);
 
-    m_p_sockfd_map = new sockinfo *[m_n_fd_map_size];
-    memset(m_p_sockfd_map, 0, m_n_fd_map_size * sizeof(sockinfo *));
+    m_p_sockfd_map = new fd_socket_slot[m_n_fd_map_size];
 
     m_p_epfd_map = new epfd_info *[m_n_fd_map_size];
     memset(m_p_epfd_map, 0, m_n_fd_map_size * sizeof(epfd_info *));
@@ -87,7 +297,7 @@ void fd_collection::prepare_to_close()
 {
     lock();
     for (int fd = 0; fd < m_n_fd_map_size; ++fd) {
-        if (m_p_sockfd_map[fd]) {
+        if (get_sockfd(fd)) {
             if (!g_is_forked_child) {
                 sockinfo *p_sfd_api = get_sockfd(fd);
                 if (p_sfd_api) {
@@ -125,7 +335,7 @@ void fd_collection::clear()
     /* Clean up all left overs sockinfo
      */
     for (fd = 0; fd < m_n_fd_map_size; ++fd) {
-        if (m_p_sockfd_map[fd]) {
+        if (get_sockfd(fd)) {
             if (!g_is_forked_child) {
                 sockinfo *p_sfd_api = get_sockfd(fd);
                 if (p_sfd_api) {
@@ -134,7 +344,7 @@ void fd_collection::clear()
                 }
             }
 
-            m_p_sockfd_map[fd] = nullptr;
+            m_p_sockfd_map[fd].clear();
             fdcoll_logdbg("destroyed fd=%d", fd);
         }
 
@@ -205,6 +415,12 @@ int fd_collection::addsocket(int fd, int domain, int type, bool check_offload /*
             }
             fdcoll_logdbg("TCP rules are either not consistent or instructing to use XLIO.");
             p_sfd_api_obj = new sockinfo_tcp(fd, domain);
+            if (safe_mce_sys().worker_threads > 0 &&
+                !static_cast<sockinfo_tcp *>(p_sfd_api_obj)->enable_worker_posix_lifetime()) {
+                delete p_sfd_api_obj;
+                errno = ENOMEM;
+                return -1;
+            }
             fd = p_sfd_api_obj->get_fd();
             break;
         }
@@ -235,7 +451,7 @@ int fd_collection::addsocket(int fd, int domain, int type, bool check_offload /*
 
     assert(!get_sockfd(fd));
     assert(!get_epfd(fd));
-    m_p_sockfd_map[fd] = p_sfd_api_obj;
+    set_socket(fd, p_sfd_api_obj);
 
     unlock();
 
@@ -428,7 +644,7 @@ int fd_collection::del_sockfd(int fd, bool is_for_udp_pool /*=false*/)
             // the socket is already closable
             // This may register the socket to be erased by internal thread,
             // However, a timer may tick on this socket before it is deleted.
-            ret_val = del_socket(fd, m_p_sockfd_map);
+            ret_val = del_socket(fd);
         } else {
             lock();
             // The socket is not ready for close.
@@ -437,11 +653,11 @@ int fd_collection::del_sockfd(int fd, bool is_for_udp_pool /*=false*/)
             // This will be done from fd_col timer handler.
             // Used for UDP socket pool as well
             // so closed UDP sockets will be deleted at the end of the world
-            if (m_p_sockfd_map[fd] == p_sfd_api) {
+            if (m_p_sockfd_map[fd].load().socket == p_sfd_api) {
                 if (!is_for_udp_pool) {
                     ++g_global_stat_static.n_pending_sockets;
                 }
-                m_p_sockfd_map[fd] = nullptr;
+                m_p_sockfd_map[fd].clear();
                 m_pending_to_remove_lst.push_front(p_sfd_api);
             }
 
@@ -457,7 +673,12 @@ bool fd_collection::handle_worker_threads_mode_close(int fd, sockinfo *p_sfd_api
 {
     if (p_sfd_api->get_protocol() == PROTO_TCP) {
         sockinfo_tcp *tcp_si = static_cast<sockinfo_tcp *>(p_sfd_api);
-        // Owner under the socket lock: lock-free null here would sync-free a socket still in ADD.
+        //  read the owner UNDER the socket lock so this routing decision is atomic
+        // w.r.t. connect_threads_mode()/distribute_socket(), which publish the owner and post the
+        // ADD_AND_CONNECT job while connect() holds m_tcp_con_lock for its whole body (until it
+        // parks). A lock-free read here can observe the stale null from before connect published
+        // the owner and then wrongly take the legacy synchronous free while the worker still has
+        // the raw socket pointer queued in an ADD_AND_CONNECT job - UAF in connect_socket_job().
         tcp_si->lock_tcp_con();
         entity_context *ec = tcp_si->get_entity_context();
         tcp_si->unlock_tcp_con();
@@ -467,9 +688,12 @@ bool fd_collection::handle_worker_threads_mode_close(int fd, sockinfo *p_sfd_api
             clear_socket(fd);
             handle_socket_close_job_worker_threads_mode(tcp_si);
             return true; // Should return from del_sockfd
-        } else if (tcp_si->get_listen_context()) {
-            // RSS listen socket - send close jobs to children
-            handle_listen_socket_close_worker_threads_mode(tcp_si);
+        } else if (tcp_si->get_listen_context() &&
+                   tcp_si->get_listen_context()->has_published_listen_rss_children()) {
+            // RSS listen socket - send close jobs to children. Guarded on published children for
+            // symmetry with submit_worker_tcp_close(): a second begin_close_wait() on an already
+            // acknowledged batch would trip its published-children assertion.
+            handle_listen_socket_close_worker_threads_mode(tcp_si, false);
             // Main listen socket - Fall through to legacy close flow below
         }
         // Other TCP sockets (e.g., created via socket() but not bound/connected/listening) - Fall
@@ -479,35 +703,47 @@ bool fd_collection::handle_worker_threads_mode_close(int fd, sockinfo *p_sfd_api
     return false; // Should continue with legacy flow
 }
 
-void fd_collection::handle_listen_socket_close_worker_threads_mode(sockinfo_tcp *listen_si)
+void fd_collection::handle_listen_socket_close_worker_threads_mode(sockinfo_tcp *listen_si,
+                                                                   bool force)
 {
-    // Reset counters before sending close jobs
-    listen_si->get_listen_context()->reset_counters();
+    sockinfo_tcp_listen_context *const listen_context = listen_si->get_listen_context();
+    assert(listen_context);
+    const bool close_owner = listen_context->begin_close_wait();
 
-    // Send close jobs to all children
-    size_t num_children = listen_si->get_listen_context()->get_listen_rss_children_size();
-    for (size_t i = 0; i < num_children; ++i) {
-        sockinfo_tcp *child = listen_si->get_listen_context()->get_listen_rss_child(i);
-        assert(child);
-        handle_socket_close_job_worker_threads_mode(child);
+    if (close_owner) {
+        // Only the transaction owner posts close. Concurrent callers join the same wait and must
+        // not reset counters or route duplicate child controls.
+        const size_t num_children = listen_context->get_listen_rss_children_size();
+        for (size_t i = 0; i < num_children; ++i) {
+            sockinfo_tcp *child = listen_context->get_listen_rss_child(i);
+            assert(child);
+            handle_socket_close_job_worker_threads_mode(child, force);
+        }
     }
-    // Wait for all children to finish
-    listen_si->get_listen_context()->wait_for_rss_children_ready();
+
+    listen_context->wait_for_rss_children_closed();
+    if (close_owner) {
+        listen_context->acknowledge_published_listen_rss_children_retired();
+    }
 }
 
-void fd_collection::handle_socket_close_job_worker_threads_mode(sockinfo_tcp *si)
+void fd_collection::handle_socket_close_job_worker_threads_mode(sockinfo_tcp *si, bool force)
 {
-    // Send close job to socket's entity context
-    assert(si->get_entity_context());
-    // One JOB_TYPE_SOCK_CLOSE per socket (connect passthrough handle_close vs app close).
+    assert(si->get_worker_retire_owner());
     si->lock_tcp_con();
-    const bool routed = si->try_route_worker_close();
-    si->unlock_tcp_con();
-    if (!routed) {
-        return;
+    si->worker_state().m_force_close = si->worker_state().m_force_close || force;
+    const bool claimed = si->begin_worker_retirement();
+    if (claimed) {
+        uint32_t controls = entity_context::SOCKET_CONTROL_CLOSE;
+        if (si->worker_state().m_force_close) {
+            controls |= entity_context::SOCKET_CONTROL_FORCE_CLOSE;
+        }
+        const bool posted =
+            si->get_worker_retire_owner()->post_socket_control_locked(si, controls, true);
+        assert(posted);
+        (void)posted;
     }
-    si->get_entity_context()->add_job(
-        entity_context::job_desc {entity_context::JOB_TYPE_SOCK_CLOSE, 0, si, nullptr, 0U, 0U});
+    si->unlock_tcp_con();
 }
 
 int fd_collection::del_epfd(int fd, bool b_cleanup /*=false*/)
@@ -551,7 +787,7 @@ template <typename cls> int fd_collection::del(int fd, bool b_cleanup, cls **map
     return -1;
 }
 
-int fd_collection::del_socket(int fd, sockinfo **map_type)
+int fd_collection::del_socket(int fd)
 {
     fdcoll_logfunc("fd=%d", fd);
 
@@ -560,9 +796,9 @@ int fd_collection::del_socket(int fd, sockinfo **map_type)
     }
 
     lock();
-    sockinfo *p_obj = map_type[fd];
+    sockinfo *p_obj = m_p_sockfd_map[fd].load().socket;
     if (p_obj) {
-        map_type[fd] = nullptr;
+        m_p_sockfd_map[fd].clear();
         unlock();
         p_obj->clean_socket_obj();
         return 0;
@@ -573,11 +809,11 @@ int fd_collection::del_socket(int fd, sockinfo **map_type)
     return -1;
 }
 
-void fd_collection::remove_from_all_epfds(int fd, bool passthrough)
+void fd_collection::remove_from_all_epfds(int fd, bool passthrough, sockinfo *expected_socket)
 {
     lock();
     for (epfd_info *ep = m_epfd_lst.front(); ep; ep = m_epfd_lst.next(ep)) {
-        ep->fd_closed(fd, passthrough);
+        ep->fd_closed(fd, passthrough, expected_socket);
     }
     unlock();
 
@@ -610,8 +846,8 @@ bool fd_collection::pop_socket_pool(int &fd, bool &add_to_udp_pool, int type)
         // use fd from pool - will skip creation of new fd by os
         sockinfo *sockfd = m_socket_pool.top();
         fd = sockfd->get_fd();
-        if (!m_p_sockfd_map[fd]) {
-            m_p_sockfd_map[fd] = sockfd;
+        if (!m_p_sockfd_map[fd].load().socket) {
+            set_socket(fd, sockfd);
             m_pending_to_remove_lst.erase(sockfd);
         }
         sockfd->prepare_to_close_socket_pool(false);

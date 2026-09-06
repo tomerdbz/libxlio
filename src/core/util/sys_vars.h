@@ -7,9 +7,11 @@
 #ifndef SYS_VARS_H
 #define SYS_VARS_H
 
+#include <atomic>
 #include <experimental/optional>
 #include <netinet/in.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string>
 
@@ -737,6 +739,9 @@ extern const mce_sys_var &safe_mce_sys();
 #define VIRTUALIZATION_FLAG "hypervisor"
 
 extern bool g_b_exit;
+static_assert(ATOMIC_BOOL_LOCK_FREE == 2,
+              "the worker blocking-exit flag must remain signal-handler lock-free");
+extern std::atomic_bool g_worker_blocking_exit;
 extern bool g_is_forked_child;
 extern bool g_init_global_ctors_done;
 

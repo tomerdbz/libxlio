@@ -262,6 +262,7 @@ libxlio_la_SOURCES := \
 	event/entity_context.h \
 	event/entity_context_manager.h \
 	event/job_queue.h \
+	event/worker_job.h \
 	\
 	ib/base/verbs_extra.h \
 	ib/mlx5/ib_mlx5.h \
@@ -271,6 +272,7 @@ libxlio_la_SOURCES := \
 	infra/cache_subject_observer.h \
 	\
 	iomux/epfd_info.h \
+	iomux/epoll_offloaded_registry.h \
 	iomux/epoll_wait_call.h \
 	iomux/io_mux_call.h \
 	iomux/poll_call.h \
@@ -317,9 +319,16 @@ libxlio_la_SOURCES := \
 	proto/xlio_lwip.h \
 	\
 	sock/cleanable_obj.h \
+	sock/fd_socket_slot.h \
 	sock/fd_collection.h \
 	sock/blocking_wait_results.h \
 	sock/sock_stats.h \
+	sock/worker_socket_lifetime.h \
+	sock/worker_socket_state.h \
+	sock/worker_rx_close_barrier.h \
+	sock/worker_rx_ready_metadata.h \
+	sock/worker_listener_close_barrier.h \
+	sock/worker_shutdown_result.h \
 	sock/sockinfo.h \
 	sock/sockinfo_tcp.h \
 	sock/sockinfo_tcp_listen_context.h \

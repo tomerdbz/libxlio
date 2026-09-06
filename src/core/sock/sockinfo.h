@@ -305,9 +305,9 @@ public:
     inline void sock_pop_descs_rx_ready(descq_t *cache);
 
     entity_context *get_entity_context() const { return m_entity_context; }
-    // Publish owner on the app thread, under the socket lock, before posting ADD_AND_*.
-    // Until the worker's ADD job runs, get_entity_context() would otherwise be null and a racing
-    // close() would SYNCHRONOUSLY free a socket still queued (and maybe parked in connect).
+    // App thread, under the socket lock, before ADD_AND_* post. Else close() sees null and
+    // sync-frees a queued (maybe parked) socket. Close routes JOB_TYPE_SOCK_CONTROL, FIFO after
+    // ADD. Attach stays in the worker's set_entity_context().
     void publish_entity_context_owner(entity_context *ec) { m_entity_context = ec; }
     uint32_t get_epoll_event_flags() { return m_epoll_event_flags; }
     uint32_t get_epoll_event_flags_thread() const { return m_epoll_event_flags_thread; }

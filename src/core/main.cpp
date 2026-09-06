@@ -85,6 +85,7 @@ const char *xlio_version_str = "XLIO_VERSION: " PACKAGE_VERSION "-" STR(PRJ_LIBR
     ; // End of xlio_version_str - used in "$ strings libxlio.so | grep XLIO_VERSION"
 
 bool g_b_exit = false;
+std::atomic_bool g_worker_blocking_exit {false};
 bool g_init_ibv_fork_done = false;
 enum ibv_fork_status g_ibv_fork_status = IBV_FORK_DISABLED;
 bool g_is_forked_child = false;
@@ -100,6 +101,12 @@ static int free_libxlio_resources()
     vlog_printf(VLOG_DEBUG, "%s: Closing libxlio resources\n", __FUNCTION__);
 
     g_b_exit = true;
+    g_worker_blocking_exit.store(true, std::memory_order_release);
+
+    if (g_p_fd_collection && safe_mce_sys().worker_threads > 0) {
+        worker_thread_manager::begin_shutdown();
+        g_p_fd_collection->retire_worker_sockets_for_shutdown();
+    }
 
     worker_thread_manager::destroy();
 
@@ -1228,6 +1235,10 @@ int do_global_ctors()
 
 void reset_globals()
 {
+    // The forked child must not inherit a parent exit-in-progress: worker blocking-wait
+    // predicates read this flag on every re-check.
+    g_worker_blocking_exit.store(false, std::memory_order_release);
+
     safe_mce_sys().unfreeze();
     worker_thread_manager::fork_nullify();
     entity_context_manager::fork_nullify();

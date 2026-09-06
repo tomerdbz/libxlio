@@ -37,6 +37,7 @@
 
 #include <vector>
 #include <atomic>
+#include <utility>
 #include "entity_context.h"
 
 class sockinfo;
@@ -44,6 +45,32 @@ class sockinfo_tcp;
 
 class entity_context_manager {
 public:
+    class socket_job_reservation {
+    public:
+        socket_job_reservation() = default;
+        socket_job_reservation(socket_job_reservation &&) noexcept = default;
+        socket_job_reservation &operator=(socket_job_reservation &&) noexcept = default;
+
+        socket_job_reservation(const socket_job_reservation &) = delete;
+        socket_job_reservation &operator=(const socket_job_reservation &) = delete;
+
+        explicit operator bool() const { return static_cast<bool>(m_reservation); }
+        entity_context::job_submit_result result() const { return m_reservation.result(); }
+        entity_context::job_submit_result commit(sockinfo *si, entity_context::job_type jobtype);
+
+    private:
+        friend class entity_context_manager;
+        socket_job_reservation(entity_context *context,
+                               entity_context::job_reservation &&reservation)
+            : m_context(context)
+            , m_reservation(std::move(reservation))
+        {
+        }
+
+        entity_context *m_context = nullptr;
+        entity_context::job_reservation m_reservation;
+    };
+
     entity_context_manager();
     ~entity_context_manager();
 
@@ -52,8 +79,8 @@ public:
     static void destroy();
     static void fork_nullify();
 
-    void distribute_socket(sockinfo *si, entity_context::job_type jobtype);
-    void distribute_listen_socket(sockinfo_tcp *si);
+    socket_job_reservation reserve_socket_job(sockinfo *si);
+    bool distribute_listen_socket(sockinfo_tcp *si);
 
     const std::vector<entity_context *> &get_all_contexts() const { return m_entity_contexts; }
 

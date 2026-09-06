@@ -989,6 +989,11 @@ void tcp_split_segment(struct tcp_pcb *pcb, struct tcp_seg *seg, u32_t wnd)
 {
     struct pbuf *p = NULL;
     struct tcp_seg *newseg = NULL;
+    pbuf_desc split_desc;
+    pbuf_desc *split_desc_ptr = &seg->p->desc;
+    void *split_opaque = NULL;
+    const int worker_express_split =
+        (pcb->flags & TF_WORKER_PARTIAL_WND_SPLIT) && seg->p->desc.attr == PBUF_DESC_EXPRESS;
     int tcp_hlen_delta;
     u32_t lentosend = 0;
     u8_t optlen = 0;
@@ -1023,14 +1028,26 @@ void tcp_split_segment(struct tcp_pcb *pcb, struct tcp_seg *seg, u32_t wnd)
         /* First buffer is too big, split it */
         u32_t lentoqueue = seg->p->len - (tcp_hlen_delta + optlen) - lentosend;
 
-        p = tcp_pbuf_prealloc(lentoqueue + optlen, pcb, type, &seg->p->desc, seg->p);
+        if (worker_express_split) {
+            /*
+             * Keep completion ownership on the original pbuf until every allocation succeeds.
+             * A failed split must not free a copied opaque and complete data that remains queued.
+             * Keep legacy and Ultra split behavior unchanged outside worker POSIX TCP.
+             */
+            split_desc = seg->p->desc;
+            split_opaque = split_desc.opaque;
+            split_desc.opaque = NULL;
+            split_desc_ptr = &split_desc;
+        }
+
+        p = tcp_pbuf_prealloc(lentoqueue + optlen, pcb, type, split_desc_ptr, seg->p);
         if (!p) {
             LWIP_DEBUGF(TCP_OUTPUT_DEBUG | 2, ("tcp_split_segment: could not allocate pbuf\n"));
             return;
         }
 
-        if (seg->p->desc.attr == PBUF_DESC_EXPRESS) {
-            /* Keep opaque value only in the right most pbuf for each send operation. */
+        if (seg->p->desc.attr == PBUF_DESC_EXPRESS && !worker_express_split) {
+            /* Preserve the legacy and Ultra completion-transfer point exactly. */
             seg->p->desc.opaque = NULL;
         }
 
@@ -1054,6 +1071,12 @@ void tcp_split_segment(struct tcp_pcb *pcb, struct tcp_seg *seg, u32_t wnd)
             p->next = NULL;
             tcp_tx_pbuf_free(pcb, p);
             return;
+        }
+
+        if (worker_express_split) {
+            /* The right-hand pbuf now owns completion for the split operation. */
+            seg->p->desc.opaque = NULL;
+            p->desc.opaque = split_opaque;
         }
 
         /* Update original buffer */
@@ -1266,8 +1289,16 @@ err_t tcp_output(struct tcp_pcb *pcb)
             tcp_split_rexmit(pcb, seg);
         }
 
-        /* Split the segment in case of a small window */
-        if ((NULL == pcb->unacked) && (wnd) && ((seg->len + seg->seqno - pcb->lastack) > wnd)) {
+        /*
+         * Split the segment in case of a small window. Legacy paths split only with no data in
+         * flight. Worker TX may also split fresh zero-copy data so a small queued prefix does not
+         * leave a large following segment blocked behind a delayed ACK. Retransmitted data has a
+         * sequence below snd_nxt and is deliberately excluded.
+         */
+        const int worker_fresh_split = (pcb->flags & TF_WORKER_PARTIAL_WND_SPLIT) &&
+            (seg->flags & TF_SEG_OPTS_ZEROCOPY) && seg->seqno == pcb->snd_nxt;
+        if ((NULL == pcb->unacked || worker_fresh_split) && wnd &&
+            ((seg->len + seg->seqno - pcb->lastack) > wnd)) {
             tcp_split_segment(pcb, seg, wnd);
         }
 
