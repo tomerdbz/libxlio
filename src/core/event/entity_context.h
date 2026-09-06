@@ -64,6 +64,7 @@ public:
 
     enum job_flag {
         JOB_FLAG_TX_LAST_CHUNK = 0x0001,
+        JOB_FLAG_SOCK_BLOCKING = 0x0002, // ADD_AND_CONNECT: snapshot at post, not live is_blocking()
     };
 
     struct job_desc {
