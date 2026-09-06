@@ -164,6 +164,7 @@ libxlio_la_SOURCES := \
 	util/hugepage_mgr.cpp \
 	util/wakeup.cpp \
 	util/wakeup_pipe.cpp \
+	util/blocking_wait_sock.cpp \
 	util/match.cpp \
 	util/utils.cpp \
 	util/instrumentation.cpp \
@@ -352,6 +353,8 @@ libxlio_la_SOURCES := \
 	util/vtypes.h \
 	util/wakeup.h \
 	util/wakeup_pipe.h \
+	util/blocking_wait.h \
+	util/blocking_wait_sock.h \
 	util/agent.h \
 	util/agent_def.h \
 	util/data_updater.h \
