@@ -57,6 +57,7 @@ public:
     enum job_type {
         JOB_TYPE_SOCK_ADD_AND_CONNECT,
         JOB_TYPE_SOCK_TX,
+        JOB_TYPE_SOCK_SHUTDOWN,
         JOB_TYPE_SOCK_RX_DATA_RECVD,
         JOB_TYPE_SOCK_ADD_AND_LISTEN,
         JOB_TYPE_SOCK_CLOSE
@@ -94,6 +95,7 @@ public:
 private:
     void connect_socket_job(const job_desc &job);
     void tx_data_job(const job_desc &job);
+    void shutdown_socket_job(const job_desc &job);
     void rx_data_recvd_job(const job_desc &job);
     void listen_socket_job(const job_desc &job);
     void close_socket_job(const job_desc &job);
