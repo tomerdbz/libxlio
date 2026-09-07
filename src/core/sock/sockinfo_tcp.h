@@ -462,7 +462,7 @@ private:
 
     int accept_helper(struct sockaddr *__addr, socklen_t *__addrlen, int __flags = 0);
     // Entered and returned with the listen lock held.
-    int accept_wait_threads_mode();
+    int accept_wait_threads_mode(loops_timer &accept_timeout);
 
     // clone socket in accept call
     sockinfo_tcp *accept_clone();
@@ -510,11 +510,12 @@ private:
     int connect_threads_mode();
     // Socket lock held.
     int connect_wait_threads_mode();
-    int rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout);
-    int rx_sleep_wait(loops_timer &rcv_timeout);
+    int rx_wait_for_data(int in_flags, struct msghdr *__msg, loops_timer &rcv_timeout,
+                         size_t min_ready_bytes = 1U);
+    int rx_sleep_wait(loops_timer &rcv_timeout, size_t min_ready_bytes = 1U);
     // Entered and returned without the socket lock.
-    int rx_sleep_wait_threads_mode(loops_timer &rcv_timeout);
-    int rx_sleep_wait_poll(loops_timer &rcv_timeout);
+    int rx_sleep_wait_threads_mode(loops_timer &rcv_timeout, size_t min_ready_bytes);
+    int rx_sleep_wait_poll(loops_timer &rcv_timeout, size_t min_ready_bytes);
 
     ssize_t rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p_flags, sockaddr *__from,
                                   socklen_t *__fromlen, struct msghdr *__msg);
@@ -586,6 +587,7 @@ private:
     void post_dequeue() override {};
 
     size_t rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, struct msghdr *__msg);
+    size_t rx_peek_ready_buffers(iovec *p_iov, iovec *p_iov_end, int flags, struct msghdr *__msg);
 
     // Returns the connected pcb, with 5 tuple which matches the input arguments,
     // in state "SYN Received" or NULL if pcb wasn't found
