@@ -344,12 +344,12 @@ TEST(blocking_wait, no_lost_wakeup_when_signaled_in_check_sleep_window)
     }
 }
 
-TEST(blocking_wait, infinite_wait_returns_ready_after_multiple_slice_expiries)
+TEST(blocking_wait, infinite_wait_returns_ready_on_late_notify)
 {
     test_waiter w;
     std::mutex lock;
     bool ready = false;
-    const int notify_after_ms = blocking_wait::WORKER_BLOCKING_EXIT_POLL_MS * 5 / 2;
+    const int notify_after_ms = 250;
 
     std::thread worker([&] {
         std::this_thread::sleep_for(ms(notify_after_ms));
@@ -368,17 +368,16 @@ TEST(blocking_wait, infinite_wait_returns_ready_after_multiple_slice_expiries)
     worker.join();
 
     EXPECT_EQ(blocking_wait::result::READY, r);
-    // At least two full slices, then notify. Not TIMEOUT.
-    EXPECT_GE(took, 2 * blocking_wait::WORKER_BLOCKING_EXIT_POLL_MS);
+    EXPECT_GE(took, notify_after_ms - 20);
     EXPECT_LT(took, 5000);
 }
 
-TEST(blocking_wait, timeout_spanning_multiple_slices_honors_user_deadline)
+TEST(blocking_wait, timeout_honors_user_deadline)
 {
     test_waiter w;
     std::mutex lock;
     bool ready = false;
-    const int user_timeout_ms = blocking_wait::WORKER_BLOCKING_EXIT_POLL_MS * 5 / 2;
+    const int user_timeout_ms = 250;
 
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     lock.lock();
@@ -388,7 +387,6 @@ TEST(blocking_wait, timeout_spanning_multiple_slices_honors_user_deadline)
     long took = elapsed_ms(start);
 
     EXPECT_EQ(blocking_wait::result::TIMEOUT, r);
-    // Full user deadline, not the first/second slice at ~100/~200ms.
     EXPECT_GE(took, user_timeout_ms - 10);
     EXPECT_LT(took, 5000);
 }
@@ -402,7 +400,7 @@ TEST(blocking_wait, two_waiters_unmatched_notify_parks_not_spins)
     std::atomic<int> in_block(0);
     sticky_wake_waiter w1(pipe, block_calls, in_block);
     sticky_wake_waiter w2(pipe, block_calls, in_block);
-    const int timeout_ms = blocking_wait::WORKER_BLOCKING_EXIT_POLL_MS * 2;
+    const int timeout_ms = 200;
 
     auto run = [&](sticky_wake_waiter &w) {
         lock.lock();
@@ -425,6 +423,6 @@ TEST(blocking_wait, two_waiters_unmatched_notify_parks_not_spins)
     t1.join();
     t2.join();
 
-    // Park: a few slices. Spin: thousands of immediate epoll_wait returns inside the deadline.
+    // Park: one wait per waiter. Spin: thousands of immediate epoll_wait returns.
     EXPECT_LT(block_calls.load(std::memory_order_relaxed), 20);
 }
