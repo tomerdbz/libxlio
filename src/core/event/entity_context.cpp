@@ -132,6 +132,9 @@ bool entity_context::process()
         case JOB_TYPE_SOCK_RX_DATA_RECVD:
             rx_data_recvd_job(job);
             break;
+        case JOB_TYPE_SOCK_CONNECT_CANCEL:
+            cancel_connect_job(job);
+            break;
         case JOB_TYPE_SOCK_CLOSE:
             close_socket_job(job);
             break;
@@ -206,6 +209,15 @@ void entity_context::shutdown_socket_job(const job_desc &job)
         return;
     }
     reinterpret_cast<sockinfo_tcp *>(job.sock)->tx_thread_shutdown(job.flags);
+}
+
+void entity_context::cancel_connect_job(const job_desc &job)
+{
+    if (unlikely(!job.sock || job.sock->get_protocol() != PROTO_TCP)) {
+        ctx_logwarn("Invalid CONNECT_CANCEL job");
+        return;
+    }
+    reinterpret_cast<sockinfo_tcp *>(job.sock)->cancel_connect_entity_context();
 }
 
 void entity_context::add_incoming_socket(sockinfo *sock)
