@@ -595,7 +595,6 @@ private:
     void post_dequeue() override {};
 
     size_t rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, struct msghdr *__msg);
-    size_t rx_peek_ready_buffers(iovec *p_iov, iovec *p_iov_end, int flags, struct msghdr *__msg);
 
     // Returns the connected pcb, with 5 tuple which matches the input arguments,
     // in state "SYN Received" or NULL if pcb wasn't found

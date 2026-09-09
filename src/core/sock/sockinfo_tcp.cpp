@@ -2497,12 +2497,10 @@ ssize_t sockinfo_tcp::rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p
     }
 
     const int errno_tmp = errno;
-    const bool peek = (*p_flags & MSG_PEEK) != 0;
     loops_timer rcv_timeout(m_loops_timer.get_timeout_msec());
     size_t min_ready_bytes = 1U;
 
-    // Match R2C: only WAITALL (and not PEEK) waits for the full request.
-    if (unlikely(((*p_flags & MSG_WAITALL) != 0) && !peek)) {
+    if (unlikely((*p_flags & MSG_WAITALL) != 0)) {
         size_t requested = 0U;
         for (ssize_t i = 0; i < sz_iov; ++i) {
             if (SIZE_MAX - requested < p_iov[i].iov_len) {
@@ -2521,9 +2519,8 @@ ssize_t sockinfo_tcp::rx_read_ready_packets(iovec *p_iov, ssize_t sz_iov, int *p
         return rc;
     }
 
-    const ssize_t fetched = peek
-        ? static_cast<ssize_t>(rx_peek_ready_buffers(p_iov, p_iov + sz_iov, *p_flags, __msg))
-        : static_cast<ssize_t>(rx_fetch_ready_buffers(p_iov, p_iov + sz_iov, __msg));
+    const ssize_t fetched =
+        static_cast<ssize_t>(rx_fetch_ready_buffers(p_iov, p_iov + sz_iov, __msg));
 
     if (__from && __fromlen) {
         // For TCP connected 5T fetch from m_connected.
@@ -2637,20 +2634,6 @@ size_t sockinfo_tcp::rx_fetch_ready_buffers(iovec *p_iov, iovec *p_iov_end, stru
     si_tcp_logfunc("tot_read=%u", tot_read);
 
     return static_cast<ssize_t>(tot_read);
-}
-
-size_t sockinfo_tcp::rx_peek_ready_buffers(iovec *p_iov, iovec *p_iov_end, int flags,
-                                           struct msghdr *__msg)
-{
-    std::lock_guard<decltype(m_app_lock)> lock_app(m_app_lock);
-    std::lock_guard<decltype(m_tcp_con_lock)> lock(m_tcp_con_lock);
-    int out_flags = 0;
-    const int count = static_cast<int>(p_iov_end - p_iov);
-    const int result = dequeue_packet(p_iov, count, nullptr, nullptr, flags | MSG_PEEK, &out_flags);
-    if (__msg && __msg->msg_control) {
-        handle_cmsg(__msg);
-    }
-    return result > 0 ? static_cast<size_t>(result) : 0U;
 }
 
 bool sockinfo_tcp::rx_tls_msg(struct msghdr *__msg, mem_buf_desc_t *out_buf)
